@@ -1,0 +1,19 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+
+# Local and secret files
+.env
+.env.*
+*.local
+
+# OS and editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Internal documents (not part of the public repository)
+*.pdf
+*.zip
+_archive/
