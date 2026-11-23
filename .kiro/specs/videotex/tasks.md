@@ -2,22 +2,22 @@
 
 Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property tests reference the properties in `design.md`.
 
-- [ ] 1. Code tables `[MVP]`
-  - [ ] 1.1 `codes.ts` with C0, ESC, colours, G1 formula, G2 accents, SEP keys from the design.
-  - [ ] 1.2 Unit tests that every table entry has a name and no code is defined twice.
-  - [ ] 1.3 Check every entry marked "(verify)" against the STUM1B document; record the source and any change in `docs/videotex-notes.md`.
+- [x] 1. Code tables `[MVP]`
+  - [x] 1.1 `codes.ts` with C0, ESC, colours, G1 formula, G2 accents, SEP keys from the design.
+  - [x] 1.2 Unit tests that every table entry has a name and no code is defined twice.
+  - [x] 1.3 Check every entry marked "(verify)" against the STUM1B document; record the source and any change in `docs/videotex-notes.md`.
   - _Requirements: 2.1-2.2, 5.1, 6.1, 7.1_
 
-- [ ] 2. Screen model `[MVP]`
-  - [ ] 2.1 `Cell`, `Screen`, blank screen, JSON serialization, cell equality.
+- [x] 2. Screen model `[MVP]`
+  - [x] 2.1 `Cell`, `Screen`, blank screen, JSON serialization, cell equality.
   - _Requirements: 1.1-1.3_
 
-- [ ] 3. Decoder `[MVP]`
-  - [ ] 3.1 State machine for C0 codes, cursor movement and wrapping.
-  - [ ] 3.2 ESC attributes, PRO1-3 and CSI skipping.
-  - [ ] 3.3 G1 printing, REP, SS2 accents.
-  - [ ] 3.4 Error-flagged bytes as error cells; statistics.
-  - [ ] 3.5 Golden tests; property tests V2, V6.
+- [x] 3. Decoder `[MVP]`
+  - [x] 3.1 State machine for C0 codes, cursor movement and wrapping.
+  - [x] 3.2 ESC attributes, PRO1-3 and CSI skipping.
+  - [x] 3.3 G1 printing, REP, SS2 accents.
+  - [x] 3.4 Error-flagged bytes as error cells; statistics.
+  - [x] 3.5 Golden tests; property tests V2, V6.
   - _Requirements: 2.1-2.6, 3.1-3.2, 9.2_
 
 - [ ] 4. Encoder `[MVP]`
