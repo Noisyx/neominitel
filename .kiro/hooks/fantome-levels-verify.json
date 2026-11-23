@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Fantome levels verify",
+      "trigger": "PostFileSave",
+      "description": "Hook 3: when content/fantome/levels.json changes, rerun scripts/generate-transmissions.ts --verify-only with tsx. Skips cleanly while the script is absent.",
+      "matcher": "(^|[\\\\/])content[\\\\/]fantome[\\\\/]levels\\.json$",
+      "action": {
+        "type": "command",
+        "command": "node .kiro/hooks/scripts/levels-verify.mjs",
+        "timeout": 600
+      }
+    }
+  ]
+}
