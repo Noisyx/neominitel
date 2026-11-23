@@ -458,7 +458,8 @@ export function forwardRhoAbs() {
 export function gitCommit() {
   try {
     const sha = execSync('git rev-parse --short HEAD', { cwd: HERE, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-    const dirty = execSync('git status --porcelain -- .', { cwd: HERE, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    // Only the experiment sources count; generated results/ files do not make the tree dirty.
+    const dirty = execSync('git status --porcelain -- . ":(exclude)results"', { cwd: HERE, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
     return dirty ? `${sha}+uncommitted` : sha;
   } catch {
     return 'unknown';
