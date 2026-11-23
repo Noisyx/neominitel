@@ -2,7 +2,7 @@
 
 Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property tests reference the properties in `design.md`.
 
-- [ ] 1. Project scaffold and test helpers `[MVP]`
+- [x] 1. Project scaffold and test helpers `[MVP]`
   - Vite + TypeScript strict, Vitest, fast-check, ESLint. Create the layout from `structure.md`.
   - Helpers: seeded RNG, `awgn`, windowed-sinc `resample`, random 7-bit byte arbitrary.
   - _Requirements: 13_

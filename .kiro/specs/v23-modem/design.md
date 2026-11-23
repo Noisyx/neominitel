@@ -37,10 +37,12 @@ export const CHANNELS: Record<ChannelId, ChannelSpec>;
 export const FRAME = { dataBits: 7, parity: 'even', stopBits: 1, bitsPerFrame: 10 } as const;
 ```
 
-## Interfaces
+## Interfaces (`src/modem/types.ts`, exported by `src/modem/index.ts`)
 
 ```ts
-interface ModulateOptions {
+export type Result<T, E> = { ok: true; value: T } | { ok: false; error: E };
+
+export interface ModulateOptions {
   sampleRate: number; channel?: ChannelId;      // default 'forward'
   amplitude?: number;                            // default 0.5, max 1
   leadIdleMs?: number; tailIdleMs?: number;      // default 100 / 50
@@ -48,31 +50,100 @@ interface ModulateOptions {
   rampMs?: number;                               // default 5
   bitErrors?: number[];                          // TEST ONLY: indices of line bits to invert
 }
-function modulate(bytes: Uint8Array, o: ModulateOptions): Result<Float32Array, ModemError>;
-function connectionSequence(o: { sampleRate: number; answerToneMs?: number; silenceMs?: number; carrierMs?: number }): Float32Array;
+export function modulate(bytes: Uint8Array, o: ModulateOptions): Result<Float32Array, ModemError>;
+export function connectionSequence(o: { sampleRate: number; answerToneMs?: number; silenceMs?: number; carrierMs?: number }): Float32Array;
 
-interface DemodOptions {
+export interface DemodOptions {
   sampleRate: number; channel?: ChannelId;
-  threshold?: 'fixed' | 'adaptive';              // default 'adaptive'
+  threshold?: 'fixed' | 'adaptive';              // default 'adaptive' ('fixed' until task 8 is integrated)
   carrierOnDbfs?: number;                        // default -45, hysteresis 3 dB
 }
-interface StreamingDemodulator {
+export interface StreamingDemodulator {
   push(chunk: Float32Array): DemodEvent[];
   flush(): DemodEvent[];
   reset(): void;
   setThresholdMode(m: 'fixed' | 'adaptive'): void;
 }
-type DemodEvent =
+export function createDemodulator(o: DemodOptions): StreamingDemodulator;
+
+export type QualityEvent = {
+  type: 'quality';
+  atSample: number;
+  snrBandDb: number;
+  snr3kDb: number;
+  ebN0Db: number;
+  parityErrorRate: number;
+  offsetHz: number;
+};
+
+export type DiagEvent = {
+  type: 'diag';
+  atSample: number;
+  freqHz: Float32Array;
+  decimation: number;
+  bitWindows: [number, number][];
+  thresholdHz: number;
+  markHz: number;
+  spaceHz: number;
+  nonFiniteCount: number;
+};
+
+export type DemodEvent =
   | { type: 'carrier'; on: boolean; atSample: number }
   | { type: 'connect'; atSample: number }
   | { type: 'char'; value: number; parityOk: boolean; framingOk: boolean; atSample: number; minConfidence: number }
-  | { type: 'quality'; snrBandDb: number; snr3kDb: number; ebN0Db: number; parityErrorRate: number; offsetHz: number }
-  | { type: 'diag'; freqHz: Float32Array; decimation: number; bitWindows: [number, number][]; thresholdHz: number; markHz: number; spaceHz: number };
+  | QualityEvent
+  | DiagEvent;
 
-type ModemError =
+export type ModemError =
   | { kind: 'byte-out-of-range'; index: number; value: number }
   | { kind: 'bad-sample-rate'; sampleRate: number }
+  | { kind: 'bad-option'; option: string; reason: string }
   | { kind: 'wav'; reason: string };
+
+export interface ChannelOptions {
+  sampleRate: number;
+  channel?: ChannelId;
+  ebN0Db?: number | null;
+  snr3kDb?: number | null;
+  offsetHz?: number;
+  clockPpm?: number;
+  humAmplitude?: number;
+  bursts?: { rateHz: number; durationMs: number; gainDb: number } | boolean;
+  seed?: number;
+}
+export interface ChannelSimulator {
+  process(chunk: Float32Array): Float32Array;
+  setOptions(o: Partial<ChannelOptions>): void;
+  reset(): void;
+}
+export function createChannelSimulator(o: ChannelOptions): ChannelSimulator;
+export function applyChannel(samples: Float32Array, o: ChannelOptions): Float32Array;
+
+export interface BerSnapshot {
+  bits: number;
+  errors: number;
+  ber: number;
+  lo: number;
+  hi: number;
+  synced: boolean;
+}
+export interface BerCounter {
+  pushBit(bit: 0 | 1, valid?: boolean): BerSnapshot;
+  pushFrame(value: number, framingOk?: boolean): BerSnapshot;
+  snapshot(): BerSnapshot;
+  reset(): void;
+}
+export function generatePn9Bytes(frameCount: number, seed?: number): Uint8Array;
+export function createBerCounter(): BerCounter;
+
+export interface TheoryCurvePoint {
+  ebN0Db: number;
+  orthogonalBer: number;
+  correlatedBer: number;
+}
+export function berOrthogonalBfsk(ebN0Db: number): number;
+export function berCorrelatedBfsk(ebN0Db: number, modulationIndex?: number): number;
 ```
 
 `Result<T, E>` is `{ ok: true; value: T } | { ok: false; error: E }`. No untyped exceptions leave the core.
@@ -112,11 +183,12 @@ States `HUNT → START → BITS → HUNT`. With T = fs_d / baud (fractional):
 - Carrier: mean |z|² over 10 ms. On when it is above `carrierOnDbfs` for 20 ms, off when it is below `carrierOnDbfs − 3 dB` for 50 ms.
 - Answer tone: Goertzel at 2100 Hz over 20 ms blocks, compared with the total band energy. `connect` is emitted after 500 ms of continuous tone.
 
-### Quality (M2M4 estimator)
+### Quality (M2M4 estimator and noise convention)
 For a constant-envelope signal plus complex Gaussian noise, with M2 = E|z|² and M4 = E|z|⁴ over the last 100 ms:
-S = √(2·M2² − M4), N = M2 − S, SNR_band = S/N.
-- SNR at 3 kHz: SNR_band · B_n / 3000, where B_n is the equivalent noise bandwidth of the low-pass (≈ 2·lowpassHz).
-- Eb/N0 = (S / baud) / (N / B_n) = SNR_band · B_n / baud.
+S = √(2·M2² − M4), N = M2 − S, γ_band = SNR_band = S/N.
+- The filter's equivalent noise bandwidth B_n is computed directly from its FIR coefficients h[k]: B_n = fs · (∑ |h[k]|²) / (∑ h[k])² (≈ 2·lowpassHz in RF).
+- γ_3k (SNR at 3 kHz reference bandwidth): γ_band · B_n / 3000.
+- Eb/N0 (energy per line bit at rate `baud` over one-sided noise spectral density N0): Eb/N0 = (S / baud) / (N / B_n) = γ_band · B_n / baud. Real AWGN of power spectral density N0/2 (two-sided) at sample rate fs has sample variance σ² = N0 · fs / 2 = (P_s · fs) / (2 · baud · (Eb/N0)).
 - If 2·M2² − M4 ≤ 0, report SNR as `-Infinity` (noise only).
 
 ### PN9 and BER
@@ -139,7 +211,7 @@ These notes are for the mathematician to check and extend.
 | M1 | Round-trip: for any 7-bit byte sequence (length 0-500) and any fs in {8000, 11025, 16000, 22050, 32000, 44100, 48000, 96000}, demodulate(modulate(b)) returns b, all `parityOk` and `framingOk`. |
 | M2 | Exact length: output length = round(fs·(lead + 10·n/baud + idle bits/baud + tail)) ± 1. |
 | M3 | Phase continuity: |x[n+1] − x[n]| ≤ A·2π·f_max/fs + 1e-6 for all n. |
-| M4 | Parity: every generated frame has even weight over data + parity. Inverting any single line bit of a frame (`bitErrors`) yields `parityOk = false` or `framingOk = false` for that frame. |
+| M4 | Parity: every generated frame has even weight over data + parity. Inverting any single checked bit (line bits 1..8: data + parity) of a frame (`bitErrors`) yields `parityOk = false` for that frame (inverting the start bit 0 would suppress the mark-to-space start edge rather than trigger a frame at the nominal bit boundary). |
 | M5 | Chunk invariance: for any partition of the input into chunks, the event list is identical. |
 | M6 | Noise: at Eb/N0 ≥ 12 dB (target, to calibrate), BER on 20 000 PN9 bits is ≤ 1e-3 for 20 seeds. |
 | M7 | Offset: in adaptive mode, for any offset in [−400, +400] Hz at 20 dB SNR, bytes are decoded without error and \|offsetHz − true offset\| ≤ 20. |
