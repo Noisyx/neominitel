@@ -1,0 +1,37 @@
+{
+  "id": "e7-perf",
+  "kind": "simulation",
+  "note": "Simulation result. Never to be reported as a hardware measurement.",
+  "node": "v24.20.0",
+  "commit": "6797a2f",
+  "date": "2026-11-23T21:49:32.508Z",
+  "experiment": "E7 mixer + polyphase FIR + frequency estimate benchmark",
+  "machine": {
+    "cpu": "Intel(R) Core(TM) i5-8350U CPU @ 1.70GHz",
+    "logicalCores": 8,
+    "platform": "win32"
+  },
+  "caveat": "Developer machine, single Node thread. Not the mid-range laptop of the spec.",
+  "parameters": {
+    "rates": [
+      8000,
+      44100,
+      48000,
+      96000
+    ],
+    "secondsPerRun": 10,
+    "runs": 5,
+    "warmup": 1,
+    "targetMsPerSecondAt48k": 40
+  },
+  "rng": {
+    "algorithm": "xoshiro128** seeded by splitmix32(fnv1a32(streamKey)); normals by Box-Muller on 53-bit uniforms",
+    "keyTemplate": "E7|role=input",
+    "streams": 1,
+    "uniqueSeeds": true,
+    "derivedSeeds": {
+      "E7|role=input": "0xb87e0dbc"
+    }
+  },
+  "runtimeMs": 76592
+}
