@@ -8,7 +8,11 @@ import {
   measureSignalPower,
   resample,
 } from './index';
-import { createDemodulator, modulate, wilson95, wilsonInterval, type DemodEvent } from '../../src/modem';
+import type { DemodEvent } from '../../src/modem';
+import {
+  createFakeDemodulator as createDemodulator,
+  fakeModulate as modulate,
+} from '../../src/workers/fake-modem';
 
 describe('J1 scaffold and test helpers', () => {
   it('createRng produces deterministic sequences for identical seeds', () => {
@@ -43,6 +47,13 @@ describe('J1 scaffold and test helpers', () => {
     expect(measuredNoiseVar).toBeCloseTo(expectedNoiseVar, 2);
   });
 
+  it('awgn signalAmplitude A gives the same noise as signalPower A^2/2', () => {
+    const clean = new Float32Array(4800);
+    const a = awgn(clean, { sampleRate: 48000, ebN0Db: 12, signalAmplitude: 0.5, seed: 3 });
+    const b = awgn(clean, { sampleRate: 48000, ebN0Db: 12, signalPower: 0.125, seed: 3 });
+    expect(a).toEqual(b);
+  });
+
   it('windowed-sinc resample preserves a low-frequency sinusoid and scales length', () => {
     const fs = 16000;
     const n = 1600;
@@ -70,8 +81,7 @@ describe('J1 scaffold and test helpers', () => {
         reason: "Before task 8 lands, only threshold: 'fixed' is accepted",
       },
     });
-    expect(wilsonInterval(0, 0, 1.96)).toEqual({ lo: 0, hi: 1 });
-    expect(Number.isNaN(wilson95(11, 10).lo)).toBe(true);
+    // wilsonInterval / wilson95 are tested with their implementation in src/modem/prbs.ts (task 10).
   });
 
   it('fake modulator + demodulator round-trips arbitrary 7-bit bytes and is chunk-invariant', () => {
