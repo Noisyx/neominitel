@@ -8,10 +8,10 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - Helpers: seeded RNG, `awgn` (Eb/N0 convention of `docs/math.md`), windowed-sinc `resample`, random 7-bit byte arbitrary.
   - _Requirements: 13_
 
-- [ ] 2. Constants and framing `[MVP]`
-  - [ ] 2.1 `v23.ts` with `CHANNELS` and `FRAME` from the design table.
-  - [ ] 2.2 `frame.ts`: byte → 10 line bits, line bits → byte + parity/framing status.
-  - [ ] 2.3 Unit tests for parity of 0x00, 0x7F, 'A'.
+- [x] 2. Constants and framing `[MVP]`
+  - [x] 2.1 `v23.ts` with `CHANNELS` and `FRAME` from the design table.
+  - [x] 2.2 `frame.ts`: byte → 10 line bits, line bits → byte + parity/framing status.
+  - [x] 2.3 Unit tests for parity of 0x00, 0x7F, 'A'.
   - _Requirements: 1.1-1.4_
 
 - [ ] 3. Modulator `[MVP]`
