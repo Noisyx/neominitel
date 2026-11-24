@@ -1,14 +1,6 @@
-export type ChannelId = 'forward' | 'backward';
+import type { ChannelId, ChannelSpec } from './v23';
 
-export interface ChannelSpec {
-  id: ChannelId;
-  baud: number;
-  markHz: number;
-  spaceHz: number;
-  mixHz: number;
-  lowpassHz: number;
-  thresholdHz: number;
-}
+export type { ChannelId, ChannelSpec };
 
 export type Result<T, E> = { ok: true; value: T } | { ok: false; error: E };
 
@@ -33,7 +25,7 @@ export interface ConnectionSequenceOptions {
 export interface DemodOptions {
   sampleRate: number;
   channel?: ChannelId;
-  threshold?: 'fixed' | 'adaptive'; // default 'adaptive' ('fixed' until task 8)
+  threshold?: 'fixed' | 'adaptive'; // see "Threshold mode" in design.md ('fixed' required until task 8)
   carrierOnDbfs?: number; // default -45, hysteresis 3 dB
 }
 
@@ -50,13 +42,13 @@ export type QualityEvent = {
 export type DiagEvent = {
   type: 'diag';
   atSample: number;
+  nonFiniteCount: number;
   freqHz: Float32Array;
   decimation: number;
   bitWindows: [number, number][];
   thresholdHz: number;
   markHz: number;
   spaceHz: number;
-  nonFiniteCount: number;
 };
 
 export type DemodEvent =
@@ -86,21 +78,34 @@ export type ModemError =
   | { kind: 'bad-option'; option: string; reason: string }
   | { kind: 'wav'; reason: string };
 
-export interface ChannelOptions {
-  sampleRate: number;
-  channel?: ChannelId;
-  ebN0Db?: number | null;
-  snr3kDb?: number | null;
-  offsetHz?: number;
-  clockPpm?: number;
-  humAmplitude?: number;
-  bursts?: { rateHz: number; durationMs: number; gainDb: number } | boolean;
-  seed?: number;
+export interface HumParams {
+  levelDb: number;
+  fundamentalHz?: number; // default 50
+  harmonics?: number; // default 5
 }
 
-export interface ChannelSimulator {
+export interface BurstParams {
+  ratePerS: number;
+  durationMs: [number, number];
+  levelDb: number;
+}
+
+export interface ChannelParams {
+  sampleRate: number;
+  seed: number; // uint32
+  channel?: ChannelId; // default 'forward'
+  signalAmplitude?: number; // default 0.5
+  noise?: { kind: 'ebN0'; db: number } | { kind: 'snr3k'; db: number };
+  offsetHz?: number;
+  clockPpm?: number;
+  hum?: HumParams;
+  bursts?: BurstParams;
+}
+
+export interface LineChannel {
   process(chunk: Float32Array): Float32Array;
-  setOptions(o: Partial<ChannelOptions>): void;
+  flush(): Float32Array;
+  setParams(p: Partial<Omit<ChannelParams, 'sampleRate' | 'seed'>>): void;
   reset(): void;
 }
 
@@ -111,13 +116,7 @@ export interface BerSnapshot {
   lo: number;
   hi: number;
   synced: boolean;
-}
-
-export interface BerCounter {
-  pushBit(bit: 0 | 1, valid?: boolean): BerSnapshot;
-  pushFrame(value: number, framingOk?: boolean): BerSnapshot;
-  snapshot(): BerSnapshot;
-  reset(): void;
+  resyncs: number;
 }
 
 export interface TheoryCurvePoint {

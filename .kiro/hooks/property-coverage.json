@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Property test coverage",
+      "trigger": "PostFileSave",
+      "description": "Hook 4: when a design.md changes, check that every correctness property (M1, V3, H2...) has a test with the same name, and report the missing ones (STRETCH ones may be absent). Read-only.",
+      "matcher": "(^|[\\\\/])design\\.md$",
+      "action": {
+        "type": "command",
+        "command": "node .kiro/hooks/scripts/property-coverage.mjs",
+        "timeout": 60
+      }
+    }
+  ]
+}

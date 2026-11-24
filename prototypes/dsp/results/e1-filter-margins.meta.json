@@ -1,0 +1,55 @@
+{
+  "id": "e1-filter-margins",
+  "kind": "simulation",
+  "note": "Simulation result. Never to be reported as a hardware measurement.",
+  "node": "v24.20.0",
+  "commit": "6797a2f",
+  "date": "2026-11-23T21:46:08.201Z",
+  "experiment": "E1 filter margins",
+  "seeds": "none (deterministic)",
+  "parameters": {
+    "sampleRates": [
+      8000,
+      11025,
+      16000,
+      22050,
+      32000,
+      44100,
+      48000,
+      96000
+    ],
+    "windows": [
+      "hamming",
+      "blackman",
+      "kaiser6",
+      "kaiser8"
+    ],
+    "conventions": [
+      {
+        "id": "c1",
+        "label": "-6 dB point 1100 Hz, transition 400 Hz (spec, reading A)",
+        "cutoffHz": 1100,
+        "transitionHz": 400
+      },
+      {
+        "id": "c2",
+        "label": "-6 dB point 1150 Hz, transition 300 Hz",
+        "cutoffHz": 1150,
+        "transitionHz": 300
+      },
+      {
+        "id": "c3",
+        "label": "passband edge 1100 Hz, transition 400 Hz (spec, reading B)",
+        "cutoffHz": 1300,
+        "transitionHz": 400
+      }
+    ],
+    "stopFromHz": 1380,
+    "rippleInterval": [
+      -950,
+      850
+    ],
+    "gridStepHzMax": 2
+  },
+  "runtimeMs": 350
+}

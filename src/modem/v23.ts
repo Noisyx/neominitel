@@ -1,4 +1,14 @@
-import type { ChannelId, ChannelSpec } from './types';
+export type ChannelId = 'forward' | 'backward';
+
+export interface ChannelSpec {
+  id: ChannelId;
+  baud: number;
+  markHz: number;
+  spaceHz: number;
+  mixHz: number;
+  lowpassHz: number;
+  thresholdHz: number;
+}
 
 export const CHANNELS: Record<ChannelId, ChannelSpec> = {
   forward: {

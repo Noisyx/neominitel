@@ -1,16 +1,16 @@
 export * from './types';
 export * from './v23';
 
-import { CHANNELS, FRAME, SAMPLE_RATE_MAX_HZ, SAMPLE_RATE_MIN_HZ } from './v23';
+import { CHANNELS, FRAME, SAMPLE_RATE_MAX_HZ, SAMPLE_RATE_MIN_HZ, type ChannelId } from './v23';
 import type {
-  BerCounter,
   BerSnapshot,
-  ChannelId,
-  ChannelOptions,
-  ChannelSimulator,
+  BurstParams,
+  ChannelParams,
   ConnectionSequenceOptions,
   DemodEvent,
   DemodOptions,
+  HumParams,
+  LineChannel,
   ModemError,
   ModulateOptions,
   Result,
@@ -177,9 +177,15 @@ export function modulate(
   const totalSamples = Math.round(sampleRate * totalSec);
   const out = new Float32Array(totalSamples);
 
-  const rampSamples = Math.min(
-    Math.floor(totalSamples / 2),
-    Math.round((rampMs / 1000) * sampleRate),
+  const leadRampMs = Math.min(rampMs, leadIdleMs);
+  const tailRampMs = Math.min(rampMs, tailIdleMs);
+  const leadRampSamples = Math.min(
+    totalSamples,
+    Math.round((leadRampMs / 1000) * sampleRate),
+  );
+  const tailRampSamples = Math.min(
+    totalSamples,
+    Math.round((tailRampMs / 1000) * sampleRate),
   );
 
   let phase = 0;
@@ -202,13 +208,11 @@ export function modulate(
     }
 
     let env = 1.0;
-    if (rampSamples > 0) {
-      if (n < rampSamples) {
-        env = 0.5 * (1 - Math.cos((Math.PI * n) / rampSamples));
-      } else if (n >= totalSamples - rampSamples) {
-        const k = totalSamples - 1 - n;
-        env = 0.5 * (1 - Math.cos((Math.PI * k) / rampSamples));
-      }
+    if (leadRampSamples > 0 && n < leadRampSamples) {
+      env = 0.5 * (1 - Math.cos((Math.PI * n) / leadRampSamples));
+    } else if (tailRampSamples > 0 && n >= totalSamples - tailRampSamples) {
+      const k = totalSamples - 1 - n;
+      env = 0.5 * (1 - Math.cos((Math.PI * k) / tailRampSamples));
     }
     out[n] = amplitude * env * Math.sin(phase);
   }
@@ -275,15 +279,56 @@ export function connectionSequence(o: ConnectionSequenceOptions): Float32Array {
 }
 
 /**
- * J1 fake streaming demodulator: implements the full `StreamingDemodulator` interface
- * with chunk invariance (M5) and scheduled events (`carrier`, `char`, `quality`, `diag`).
+ * J1 fake streaming demodulator: implements the `createDemodulator` factory and
+ * `StreamingDemodulator` interface per the amended `v23-modem/design.md` contract.
+ * Until Task 8 lands, only `threshold: 'fixed'` is accepted; `setThresholdMode('adaptive')`
+ * is a documented no-op that leaves the mode at `'fixed'`.
  * Role B replaces this with the real DSP demodulator in Tasks 5-8.
  */
-export function createDemodulator(o: DemodOptions): StreamingDemodulator {
+export function createDemodulator(
+  o: DemodOptions,
+): Result<StreamingDemodulator, ModemError> {
+  const { sampleRate } = o;
+  if (
+    !Number.isFinite(sampleRate) ||
+    sampleRate < SAMPLE_RATE_MIN_HZ ||
+    sampleRate > SAMPLE_RATE_MAX_HZ
+  ) {
+    return { ok: false, error: { kind: 'bad-sample-rate', sampleRate } };
+  }
+
   const channelId: ChannelId = o.channel ?? 'forward';
   const spec = CHANNELS[channelId];
-  const sampleRate = o.sampleRate;
-  let thresholdMode: 'fixed' | 'adaptive' = o.threshold ?? 'fixed';
+  if (!spec) {
+    return {
+      ok: false,
+      error: { kind: 'bad-option', option: 'channel', reason: 'Unknown channel' },
+    };
+  }
+
+  if (o.threshold !== 'fixed') {
+    return {
+      ok: false,
+      error: {
+        kind: 'bad-option',
+        option: 'threshold',
+        reason: "Before task 8 lands, only threshold: 'fixed' is accepted",
+      },
+    };
+  }
+
+  if (o.carrierOnDbfs !== undefined && !Number.isFinite(o.carrierOnDbfs)) {
+    return {
+      ok: false,
+      error: {
+        kind: 'bad-option',
+        option: 'carrierOnDbfs',
+        reason: 'carrierOnDbfs must be finite',
+      },
+    };
+  }
+
+  let thresholdMode: 'fixed' | 'adaptive' = 'fixed';
 
   let cursor = 0;
   let nonFiniteCount = 0;
@@ -291,11 +336,11 @@ export function createDemodulator(o: DemodOptions): StreamingDemodulator {
   let nextFrameIndex = 0;
   let carrierOnEmitted = false;
   let carrierOffEmitted = false;
-  let nextDiagSample = Math.max(1, Math.round(0.05 * sampleRate));
-  let nextQualitySample = Math.max(1, Math.round(0.1 * sampleRate));
 
   const diagIntervalSamples = Math.max(1, Math.round(0.05 * sampleRate));
   const qualityIntervalSamples = Math.max(1, Math.round(0.1 * sampleRate));
+  let nextDiagSample = diagIntervalSamples;
+  let nextQualitySample = qualityIntervalSamples;
   const decimation =
     channelId === 'forward'
       ? Math.max(1, Math.floor(sampleRate / 16000))
@@ -314,7 +359,7 @@ export function createDemodulator(o: DemodOptions): StreamingDemodulator {
     }
   }
 
-  return {
+  const demodulator: StreamingDemodulator = {
     push(chunk: Float32Array): DemodEvent[] {
       if (chunk.length === 0) {
         return [];
@@ -394,13 +439,13 @@ export function createDemodulator(o: DemodOptions): StreamingDemodulator {
           timedEvents.push({
             type: 'diag',
             atSample: nextDiagSample,
+            nonFiniteCount,
             freqHz: new Float32Array([spec.markHz]),
             decimation,
             bitWindows: [],
             thresholdHz: spec.thresholdHz,
             markHz: spec.markHz,
             spaceHz: spec.spaceHz,
-            nonFiniteCount,
           });
         }
         nextDiagSample += diagIntervalSamples;
@@ -425,40 +470,86 @@ export function createDemodulator(o: DemodOptions): StreamingDemodulator {
       nextQualitySample = qualityIntervalSamples;
     },
 
-    setThresholdMode(m: 'fixed' | 'adaptive'): void {
-      thresholdMode = m;
+    setThresholdMode(_m: 'fixed' | 'adaptive'): void {
+      // Documented no-op before Task 8: mode remains 'fixed'
+      thresholdMode = 'fixed';
       void thresholdMode;
     },
   };
+
+  return { ok: true, value: demodulator };
 }
 
-export function createChannelSimulator(o: ChannelOptions): ChannelSimulator {
-  let opts: ChannelOptions = { ...o };
+export const DEFAULT_HUM: HumParams = {
+  levelDb: -20,
+  fundamentalHz: 50,
+  harmonics: 5,
+};
+
+export const DEFAULT_BURSTS: BurstParams = {
+  ratePerS: 0.5,
+  durationMs: [5, 25],
+  levelDb: -6,
+};
+
+export function createChannel(p: ChannelParams): Result<LineChannel, ModemError> {
+  if (
+    !Number.isFinite(p.sampleRate) ||
+    p.sampleRate < SAMPLE_RATE_MIN_HZ ||
+    p.sampleRate > SAMPLE_RATE_MAX_HZ
+  ) {
+    return { ok: false, error: { kind: 'bad-sample-rate', sampleRate: p.sampleRate } };
+  }
+  let params: ChannelParams = { ...p };
   return {
-    process(chunk: Float32Array): Float32Array {
-      void opts;
-      return chunk.slice();
-    },
-    setOptions(next: Partial<ChannelOptions>): void {
-      opts = { ...opts, ...next };
-    },
-    reset(): void {
-      // no-op in J1 scaffold stub
+    ok: true,
+    value: {
+      process(chunk: Float32Array): Float32Array {
+        void params;
+        return chunk.slice();
+      },
+      flush(): Float32Array {
+        return new Float32Array(0);
+      },
+      setParams(next: Partial<Omit<ChannelParams, 'sampleRate' | 'seed'>>): void {
+        params = { ...params, ...next };
+      },
+      reset(): void {
+        // no-op in J1 scaffold stub
+      },
     },
   };
 }
 
-export function applyChannel(samples: Float32Array, o: ChannelOptions): Float32Array {
-  return createChannelSimulator(o).process(samples);
+export function applyChannel(
+  x: Float32Array,
+  p: ChannelParams,
+): Result<Float32Array, ModemError> {
+  const ch = createChannel(p);
+  if (!ch.ok) {
+    return ch;
+  }
+  const a = ch.value.process(x);
+  const b = ch.value.flush();
+  if (b.length === 0) {
+    return { ok: true, value: a };
+  }
+  const out = new Float32Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return { ok: true, value: out };
 }
 
-export function generatePn9Bytes(frameCount: number, seed = 0x1ff): Uint8Array {
-  let lfsr = seed & 0x1ff;
-  if (lfsr === 0) {
-    lfsr = 0x1ff;
+export function pn9Frames(frames: number, o?: { startFrame?: number }): Uint8Array {
+  const startFrame = o?.startFrame ?? 0;
+  let lfsr = 0x1ff;
+  const skipBits = Math.max(0, startFrame) * 7;
+  for (let s = 0; s < skipBits; s++) {
+    const feedback = ((lfsr >> 0) ^ (lfsr >> 4)) & 1;
+    lfsr = ((lfsr >> 1) | (feedback << 8)) & 0x1ff;
   }
-  const out = new Uint8Array(frameCount);
-  for (let i = 0; i < frameCount; i++) {
+  const out = new Uint8Array(Math.max(0, frames));
+  for (let i = 0; i < out.length; i++) {
     let byte = 0;
     for (let b = 0; b < 7; b++) {
       const bit = lfsr & 1;
@@ -471,43 +562,84 @@ export function generatePn9Bytes(frameCount: number, seed = 0x1ff): Uint8Array {
   return out;
 }
 
-export function createBerCounter(): BerCounter {
-  let bits = 0;
-  let errors = 0;
-  function makeSnapshot(): BerSnapshot {
-    const ber = bits > 0 ? errors / bits : 0;
-    return { bits, errors, ber, lo: ber, hi: ber, synced: bits >= 9 };
+export function wilsonInterval(
+  errors: number,
+  bits: number,
+  z: number,
+): { lo: number; hi: number } {
+  if (
+    !Number.isInteger(errors) ||
+    !Number.isInteger(bits) ||
+    bits < 0 ||
+    errors < 0 ||
+    errors > bits ||
+    !Number.isFinite(z) ||
+    z <= 0
+  ) {
+    return { lo: NaN, hi: NaN };
   }
+  if (bits === 0) {
+    return { lo: 0, hi: 1 };
+  }
+  const p = errors / bits;
+  const z2 = z * z;
+  const denom = 1 + z2 / bits;
+  const center = (p + z2 / (2 * bits)) / denom;
+  const half =
+    (z * Math.sqrt((p * (1 - p)) / bits + z2 / (4 * bits * bits))) / denom;
   return {
-    pushBit(_bit: 0 | 1, valid = true): BerSnapshot {
-      bits++;
-      if (!valid) {
-        errors++;
-      }
-      return makeSnapshot();
-    },
-    pushFrame(_value: number, framingOk = true): BerSnapshot {
-      bits += 7;
-      if (!framingOk) {
-        errors += 7;
-      }
-      return makeSnapshot();
-    },
-    snapshot(): BerSnapshot {
-      return makeSnapshot();
-    },
-    reset(): void {
-      bits = 0;
-      errors = 0;
-    },
+    lo: Math.max(0, center - half),
+    hi: Math.min(1, center + half),
   };
 }
 
-export function berOrthogonalBfsk(ebN0Db: number): number {
+export function wilson95(errors: number, bits: number): { lo: number; hi: number } {
+  return wilsonInterval(errors, bits, 1.96);
+}
+
+export class BerCounter {
+  private bits = 0;
+  private errors = 0;
+  private resyncs = 0;
+
+  pushFrame(_value: number, framingOk: boolean): void {
+    this.bits += 7;
+    if (!framingOk) {
+      this.errors += 7;
+    }
+  }
+
+  snapshot(): BerSnapshot {
+    const ber = this.bits > 0 ? this.errors / this.bits : 0;
+    const { lo, hi } = wilson95(this.errors, this.bits);
+    return {
+      bits: this.bits,
+      errors: this.errors,
+      ber,
+      lo,
+      hi,
+      synced: this.bits >= 9,
+      resyncs: this.resyncs,
+    };
+  }
+
+  reset(): void {
+    this.bits = 0;
+    this.errors = 0;
+    this.resyncs = 0;
+  }
+}
+
+export const FORWARD_RHO = (() => {
+  const h = (CHANNELS.forward.spaceHz - CHANNELS.forward.markHz) / CHANNELS.forward.baud;
+  return Math.abs(Math.sin(Math.PI * h) / (Math.PI * h));
+})();
+
+export function berOrthogonalNoncoherent(ebN0Db: number): number {
   const ebN0Lin = Math.pow(10, ebN0Db / 10);
   return 0.5 * Math.exp(-0.5 * ebN0Lin);
 }
 
-export function berCorrelatedBfsk(ebN0Db: number, _modulationIndex = 2 / 3): number {
-  return berOrthogonalBfsk(ebN0Db);
+export function berNoncoherentCorrelated(ebN0Db: number, _rho = FORWARD_RHO): number {
+  return berOrthogonalNoncoherent(ebN0Db);
 }

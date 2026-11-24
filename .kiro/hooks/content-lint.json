@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Content lint (A6)",
+      "trigger": "PostFileSave",
+      "description": "Hook 2: when a file in content/pages/ is saved, run the A6 content lint test (size, allowed characters, pages different enough). Skips cleanly while the test is absent.",
+      "matcher": "(^|[\\\\/])content[\\\\/]pages[\\\\/]",
+      "action": {
+        "type": "command",
+        "command": "node .kiro/hooks/scripts/content-lint.mjs",
+        "timeout": 120
+      }
+    }
+  ]
+}

@@ -4,7 +4,8 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
 
 - [x] 1. Project scaffold and test helpers `[MVP]`
   - Vite + TypeScript strict, Vitest, fast-check, ESLint. Create the layout from `structure.md`.
-  - Helpers: seeded RNG, `awgn`, windowed-sinc `resample`, random 7-bit byte arbitrary.
+  - `tsx` as the TypeScript script runner (devDependency). Scripts `test` (fast) and `test:slow` (`NEOMINITEL_SLOW=1`). `prototypes/` is excluded from ESLint and `tsconfig`.
+  - Helpers: seeded RNG, `awgn` (Eb/N0 convention of `docs/math.md`), windowed-sinc `resample`, random 7-bit byte arbitrary.
   - _Requirements: 13_
 
 - [ ] 2. Constants and framing `[MVP]`
@@ -15,8 +16,8 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
 
 - [ ] 3. Modulator `[MVP]`
   - [ ] 3.1 Phase-continuous oscillator driven by an exact bit timeline.
-  - [ ] 3.2 `modulate()` with idle lead/tail, inter-frame idle, raised-cosine ramps, typed errors, `bitErrors` test option.
-  - [ ] 3.3 `connectionSequence()`.
+  - [ ] 3.2 `modulate()` with idle lead/tail, inter-frame idle, raised-cosine ramps limited to the available idle duration, typed errors, `bitErrors` test option.
+  - [ ] 3.3 `connectionSequence()`. Default durations are provisional until task 12.
   - [ ] 3.4 Property tests M2, M3, M4 (parity half).
   - _Requirements: 2.1-2.7, 3.1-3.2_
 
@@ -34,11 +35,11 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
 - [ ] 6. UART and fixed threshold `[MVP]`
   - [ ] 6.1 Soft value, HUNT/START/BITS state machine with sub-sample edge location.
   - [ ] 6.2 `char` events with parity, framing and confidence.
-  - [ ] 6.3 Property tests M1 (fixed threshold, clean), M4 (detection half), M8.
+  - [ ] 6.3 Property tests M1 (fixed threshold, clean), M4 (detection half, line bits 1 to 8), M8. Characterization tests for start-bit and stop-bit inversion.
   - _Requirements: 6.1-6.6_
 
 - [ ] 7. Streaming demodulator `[MVP]`
-  - [ ] 7.1 `StreamingDemodulator` with `push`, `flush`, `reset`, events.
+  - [ ] 7.1 `createDemodulator` and `StreamingDemodulator` with `push`, `flush`, `reset`, events. Until task 8 lands, only `threshold: 'fixed'` is accepted (see "Threshold mode" in `design.md`); `'fixed'` remains supported afterwards.
   - [ ] 7.2 Carrier detect with hysteresis, answer-tone detect (`connect`).
   - [ ] 7.3 `diag` events, rate-limited to 50 ms.
   - [ ] 7.4 Property test M5.
@@ -46,7 +47,7 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
 
 - [ ] 8. Adaptive threshold `[MVP]`
   - [ ] 8.1 Decision-directed two-means, live mode switch.
-  - [ ] 8.2 Property test M7.
+  - [ ] 8.2 Property test M7. Non-regression test: the fixed-threshold path is unchanged after task 8. From this task, `threshold` defaults to `'adaptive'`.
   - _Requirements: 7.1-7.4_
 
 - [ ] 9. Line simulator `[MVP]`
@@ -56,13 +57,13 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
 
 - [ ] 10. Quality and BER `[MVP]`
   - [ ] 10.1 M2M4 SNR estimator, 3 kHz normalization, Eb/N0, parity error rate.
-  - [ ] 10.2 PN9 generator, self-synchronizing BER counter, Wilson interval.
+  - [ ] 10.2 PN9 generator (`pn9Frames`), self-synchronizing `BerCounter`, `wilsonInterval` and its `wilson95` convenience wrapper.
   - [ ] 10.3 Property tests M10, M11, M6.
   - _Requirements: 9.1-9.4, 10.1-10.3_
 
 - [ ] 11. Theory curves `[MVP]` (mathematician)
   - [ ] 11.1 Orthogonal reference, Marcum Q formula with ρ for h = 2/3, write derivations in `docs/math.md`.
-  - [ ] 11.2 Monte Carlo script producing curve 3 with intervals, saved as JSON for the app.
+  - [ ] 11.2 `scripts/montecarlo-ber.ts` producing curve 3 with intervals, saved as `public/data/ber-curve3.json` for the app.
   - [ ] 11.3 Property test M12.
   - _Requirements: 10.4_
 
@@ -71,7 +72,7 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - _Requirements: 3.2, 9.3_
 
 - [ ] 13. Performance `[MVP]`
-  - Benchmark 60 s of 48 kHz audio in Node; must run in under 3.6 s. Profile the FIR if not.
+  - Benchmark (`scripts/bench-modem.ts`) 60 s of 48 kHz audio in Node; must run in under 3.6 s. Profile the FIR if not. A preliminary run is recorded earlier in `docs/calibration.md`.
   - _Requirements: 13.1-13.2_
 
 - [ ] 14. Backward channel `[STRETCH]`

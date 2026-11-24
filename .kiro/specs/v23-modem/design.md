@@ -37,12 +37,12 @@ export const CHANNELS: Record<ChannelId, ChannelSpec>;
 export const FRAME = { dataBits: 7, parity: 'even', stopBits: 1, bitsPerFrame: 10 } as const;
 ```
 
-## Interfaces (`src/modem/types.ts`, exported by `src/modem/index.ts`)
+## Interfaces
+
+These types live in `src/modem/types.ts`. `src/modem/index.ts` is the only import point for code outside `src/modem/`. `ChannelId`, `ChannelSpec`, `CHANNELS` and `FRAME` stay in `v23.ts`. A change to this section or to property M4 needs the written approval of both developers.
 
 ```ts
-export type Result<T, E> = { ok: true; value: T } | { ok: false; error: E };
-
-export interface ModulateOptions {
+interface ModulateOptions {
   sampleRate: number; channel?: ChannelId;      // default 'forward'
   amplitude?: number;                            // default 0.5, max 1
   leadIdleMs?: number; tailIdleMs?: number;      // default 100 / 50
@@ -50,109 +50,90 @@ export interface ModulateOptions {
   rampMs?: number;                               // default 5
   bitErrors?: number[];                          // TEST ONLY: indices of line bits to invert
 }
-export function modulate(bytes: Uint8Array, o: ModulateOptions): Result<Float32Array, ModemError>;
-export function connectionSequence(o: { sampleRate: number; answerToneMs?: number; silenceMs?: number; carrierMs?: number }): Float32Array;
+function modulate(bytes: Uint8Array, o: ModulateOptions): Result<Float32Array, ModemError>;
+function connectionSequence(o: { sampleRate: number; answerToneMs?: number; silenceMs?: number; carrierMs?: number }): Float32Array;
 
-export interface DemodOptions {
+interface DemodOptions {
   sampleRate: number; channel?: ChannelId;
-  threshold?: 'fixed' | 'adaptive';              // default 'adaptive' ('fixed' until task 8 is integrated)
+  threshold?: 'fixed' | 'adaptive';              // see "Threshold mode" below
   carrierOnDbfs?: number;                        // default -45, hysteresis 3 dB
 }
-export interface StreamingDemodulator {
+function createDemodulator(o: DemodOptions): Result<StreamingDemodulator, ModemError>;
+interface StreamingDemodulator {
   push(chunk: Float32Array): DemodEvent[];
   flush(): DemodEvent[];
   reset(): void;
   setThresholdMode(m: 'fixed' | 'adaptive'): void;
 }
-export function createDemodulator(o: DemodOptions): StreamingDemodulator;
-
-export type QualityEvent = {
-  type: 'quality';
-  atSample: number;
-  snrBandDb: number;
-  snr3kDb: number;
-  ebN0Db: number;
-  parityErrorRate: number;
-  offsetHz: number;
-};
-
-export type DiagEvent = {
-  type: 'diag';
-  atSample: number;
-  freqHz: Float32Array;
-  decimation: number;
-  bitWindows: [number, number][];
-  thresholdHz: number;
-  markHz: number;
-  spaceHz: number;
-  nonFiniteCount: number;
-};
-
-export type DemodEvent =
+type DemodEvent =
   | { type: 'carrier'; on: boolean; atSample: number }
   | { type: 'connect'; atSample: number }
   | { type: 'char'; value: number; parityOk: boolean; framingOk: boolean; atSample: number; minConfidence: number }
-  | QualityEvent
-  | DiagEvent;
+  | { type: 'quality'; atSample: number; snrBandDb: number; snr3kDb: number; ebN0Db: number; parityErrorRate: number; offsetHz: number }
+  | { type: 'diag'; atSample: number; nonFiniteCount: number; freqHz: Float32Array; decimation: number; bitWindows: [number, number][]; thresholdHz: number; markHz: number; spaceHz: number };
 
-export type ModemError =
+type ModemError =
   | { kind: 'byte-out-of-range'; index: number; value: number }
   | { kind: 'bad-sample-rate'; sampleRate: number }
   | { kind: 'bad-option'; option: string; reason: string }
   | { kind: 'wav'; reason: string };
-
-export interface ChannelOptions {
-  sampleRate: number;
-  channel?: ChannelId;
-  ebN0Db?: number | null;
-  snr3kDb?: number | null;
-  offsetHz?: number;
-  clockPpm?: number;
-  humAmplitude?: number;
-  bursts?: { rateHz: number; durationMs: number; gainDb: number } | boolean;
-  seed?: number;
-}
-export interface ChannelSimulator {
-  process(chunk: Float32Array): Float32Array;
-  setOptions(o: Partial<ChannelOptions>): void;
-  reset(): void;
-}
-export function createChannelSimulator(o: ChannelOptions): ChannelSimulator;
-export function applyChannel(samples: Float32Array, o: ChannelOptions): Float32Array;
-
-export interface BerSnapshot {
-  bits: number;
-  errors: number;
-  ber: number;
-  lo: number;
-  hi: number;
-  synced: boolean;
-}
-export interface BerCounter {
-  pushBit(bit: 0 | 1, valid?: boolean): BerSnapshot;
-  pushFrame(value: number, framingOk?: boolean): BerSnapshot;
-  snapshot(): BerSnapshot;
-  reset(): void;
-}
-export function generatePn9Bytes(frameCount: number, seed?: number): Uint8Array;
-export function createBerCounter(): BerCounter;
-
-export interface TheoryCurvePoint {
-  ebN0Db: number;
-  orthogonalBer: number;
-  correlatedBer: number;
-}
-export function berOrthogonalBfsk(ebN0Db: number): number;
-export function berCorrelatedBfsk(ebN0Db: number, modulationIndex?: number): number;
 ```
 
 `Result<T, E>` is `{ ok: true; value: T } | { ok: false; error: E }`. No untyped exceptions leave the core.
+`videotex` defines its own structurally identical `Result`; the two cores never import each other.
+
+**Events.** `atSample` is an absolute input-sample index since the last `reset()`, group-delay compensated. Events are emitted in detection order, not sorted by `atSample` (a `char` is known about 10 bit periods after its start); consumers sort by `atSample` (stable). `nonFiniteCount` is the cumulative number of NaN or infinite input samples replaced by 0 since `reset()`.
+
+**Factory.** `createDemodulator` returns `bad-sample-rate` when `sampleRate` is not finite or lies outside 8 000 to 96 000 Hz, and `bad-option` for any other invalid option. Non-integer rates are accepted. `push`, `flush` and `reset` never throw.
+
+**Threshold mode.** Final behaviour (from task 8): `threshold` defaults to `'adaptive'`; `'fixed'` stays supported and its output is unchanged. Before task 8 lands, only `'fixed'` is accepted: any other value, or an omitted `threshold`, returns `bad-option`, with no silent fallback. Before task 8, `setThresholdMode('adaptive')` leaves the mode at `'fixed'` (documented no-op); the app keeps its automatic-tuning control disabled until task 8.
+
+### Line simulator API (`src/modem/channel.ts`)
+```ts
+interface HumParams   { levelDb: number; fundamentalHz?: number /* 50 */; harmonics?: number /* 5 */ }  // level relative to the signal power
+interface BurstParams { ratePerS: number; durationMs: [number, number]; levelDb: number }
+const DEFAULT_HUM: HumParams; const DEFAULT_BURSTS: BurstParams;
+interface ChannelParams {
+  sampleRate: number; seed: number;                 // seed: uint32
+  channel?: ChannelId;                              // bit rate used by Eb/N0, default 'forward'
+  signalAmplitude?: number;                         // reference peak amplitude of the received tone, default 0.5
+  noise?: { kind: 'ebN0'; db: number } | { kind: 'snr3k'; db: number };   // absent = no noise
+  offsetHz?: number; clockPpm?: number; hum?: HumParams; bursts?: BurstParams;
+}
+interface LineChannel {
+  process(chunk: Float32Array): Float32Array;       // new array; length differs when clockPpm != 0
+  flush(): Float32Array;
+  setParams(p: Partial<Omit<ChannelParams, 'sampleRate' | 'seed'>>): void;   // from the next sample
+  reset(): void;
+}
+function createChannel(p: ChannelParams): Result<LineChannel, ModemError>;
+function applyChannel(x: Float32Array, p: ChannelParams): Result<Float32Array, ModemError>;   // one-shot
+```
+Order of impairments: clock resampling, frequency offset, hum, bursts, then AWGN. The simulator has unit gain, so `signalAmplitude` must equal the amplitude of the signal passed in; it is the reference used to compute the noise, hum and burst levels. Eb/N0 and SNR refer to the AWGN only. Output is not clipped; consumers normalise before playback. With unchanged parameters, output does not depend on chunk boundaries.
+
+### PN9 and BER API (`src/modem/prbs.ts`)
+```ts
+function pn9Frames(frames: number, o?: { startFrame?: number }): Uint8Array;   // 7 bits per byte, LSB first
+function wilsonInterval(errors: number, bits: number, z: number): { lo: number; hi: number };
+function wilson95(errors: number, bits: number): { lo: number; hi: number };   // = wilsonInterval(errors, bits, 1.96)
+interface BerSnapshot { bits: number; errors: number; ber: number; lo: number; hi: number; synced: boolean; resyncs: number }
+class BerCounter { pushFrame(value: number, framingOk: boolean): void; snapshot(): BerSnapshot; reset(): void }
+```
+The period is 511 bits = 73 frames of 7 bits. The 9 synchronisation bits are not counted. The `lo` and `hi` of `BerSnapshot` are the 95 % Wilson interval.
+
+### Theory API (`src/modem/theory.ts`)
+```ts
+const FORWARD_RHO: number;                                                      // |sin(πh)/(πh)|, h = 2/3, derived from v23.ts
+function berOrthogonalNoncoherent(ebN0Db: number): number;                      // curve 1
+function berNoncoherentCorrelated(ebN0Db: number, rho: number): number;         // curve 2
+```
+Curve 3 is written by `scripts/montecarlo-ber.ts` to `public/data/ber-curve3.json` as `{ ebN0Db: number[]; ber: number[]; lo: number[]; hi: number[]; bitsPerPoint: number[]; seeds: number }`.
 
 ## Algorithms
 
 ### Modulator
 - The bit timeline is computed in real time: bit k (counting idle lead as bits of mark) covers [t₀ + k/baud, t₀ + (k+1)/baud). Sample n gets the frequency of the bit that contains n / fs. This makes the length exact and stops rounding from accumulating.
-- Phase accumulator in double precision: φ += 2π·f/fs, sample = A·w(n)·sin φ, where w is the raised-cosine ramp at carrier start and end.
+- Phase accumulator in double precision: φ += 2π·f/fs, sample = A·w(n)·sin φ, where w is the raised-cosine ramp at carrier start and end. The effective ramp length is min(`rampMs`, `leadIdleMs`) at the start and min(`rampMs`, `tailIdleMs`) at the end, so a ramp never overlaps a frame.
 - `bitErrors` inverts chosen line bits after framing. It exists only for property tests (parity and framing errors) and is never set by the app.
 
 ### Discriminator
@@ -183,18 +164,18 @@ States `HUNT → START → BITS → HUNT`. With T = fs_d / baud (fractional):
 - Carrier: mean |z|² over 10 ms. On when it is above `carrierOnDbfs` for 20 ms, off when it is below `carrierOnDbfs − 3 dB` for 50 ms.
 - Answer tone: Goertzel at 2100 Hz over 20 ms blocks, compared with the total band energy. `connect` is emitted after 500 ms of continuous tone.
 
-### Quality (M2M4 estimator and noise convention)
+### Quality (M2M4 estimator)
 For a constant-envelope signal plus complex Gaussian noise, with M2 = E|z|² and M4 = E|z|⁴ over the last 100 ms:
-S = √(2·M2² − M4), N = M2 − S, γ_band = SNR_band = S/N.
-- The filter's equivalent noise bandwidth B_n is computed directly from its FIR coefficients h[k]: B_n = fs · (∑ |h[k]|²) / (∑ h[k])² (≈ 2·lowpassHz in RF).
-- γ_3k (SNR at 3 kHz reference bandwidth): γ_band · B_n / 3000.
-- Eb/N0 (energy per line bit at rate `baud` over one-sided noise spectral density N0): Eb/N0 = (S / baud) / (N / B_n) = γ_band · B_n / baud. Real AWGN of power spectral density N0/2 (two-sided) at sample rate fs has sample variance σ² = N0 · fs / 2 = (P_s · fs) / (2 · baud · (Eb/N0)).
+S = √(2·M2² − M4), N = M2 − S, SNR_band = S/N.
+- SNR at 3 kHz: SNR_band · B_n / 3000, where B_n = fs·Σh² / (Σh)² is the two-sided equivalent noise bandwidth of the complex low-pass, computed from its taps (≈ 2·lowpassHz). The 3 000 Hz is a one-sided reference band.
+- Eb/N0 = (S / baud) / (N / B_n) = SNR_band · B_n / baud.
+Definitions and notation (γ_band, γ_3k, Eb/N0, signal power P = A²/2, mixer normalisation) are fixed in `docs/math.md`. Eb/N0 is reported for the signal received at the demodulator input.
 - If 2·M2² − M4 ≤ 0, report SNR as `-Infinity` (noise only).
 
 ### PN9 and BER
 - LFSR x⁹ + x⁵ + 1, seed 0x1FF, period 511. Bits are packed 7 per frame, least significant first.
 - Receiver: load 9 received bits into its own LFSR, then predict every next bit and count mismatches. Reseed when more than 20 of the last 100 bits are wrong. Bits of frames with framing errors are counted as errors.
-- Wilson 95% interval: (p̂ + z²/2n ± z·√(p̂(1−p̂)/n + z²/4n²)) / (1 + z²/n), with z = 1.96.
+- Wilson interval: (p̂ + z²/2n ± z·√(p̂(1−p̂)/n + z²/4n²)) / (1 + z²/n). `wilsonInterval(errors, bits, z)` is the single implementation for every confidence level; the 95 % interval is z = 1.96 (`wilson95`). For `bits = 0` the interval is [0, 1]; invalid arguments (non-integer counts, `errors` outside [0, `bits`], `z` ≤ 0) return `NaN` bounds and never throw.
 
 ## Math notes (`src/modem/theory.ts`, derivations in `docs/math.md`)
 These notes are for the mathematician to check and extend.
@@ -211,7 +192,7 @@ These notes are for the mathematician to check and extend.
 | M1 | Round-trip: for any 7-bit byte sequence (length 0-500) and any fs in {8000, 11025, 16000, 22050, 32000, 44100, 48000, 96000}, demodulate(modulate(b)) returns b, all `parityOk` and `framingOk`. |
 | M2 | Exact length: output length = round(fs·(lead + 10·n/baud + idle bits/baud + tail)) ± 1. |
 | M3 | Phase continuity: |x[n+1] − x[n]| ≤ A·2π·f_max/fs + 1e-6 for all n. |
-| M4 | Parity: every generated frame has even weight over data + parity. Inverting any single checked bit (line bits 1..8: data + parity) of a frame (`bitErrors`) yields `parityOk = false` for that frame (inverting the start bit 0 would suppress the mark-to-space start edge rather than trigger a frame at the nominal bit boundary). |
+| M4 | Parity: every generated frame has even weight over data + parity. Inverting any single data or parity line bit (line bits 1 to 8) of a frame (`bitErrors`) yields `parityOk = false` for that frame. Inverting the start bit (bit 0) or the stop bit (bit 9) is outside this property: a start-bit inversion loses the frame, and a stop-bit inversion yields `framingOk = false` and may lose the following frame. Both behaviours are covered by characterization tests. |
 | M5 | Chunk invariance: for any partition of the input into chunks, the event list is identical. |
 | M6 | Noise: at Eb/N0 ≥ 12 dB (target, to calibrate), BER on 20 000 PN9 bits is ≤ 1e-3 for 20 seeds. |
 | M7 | Offset: in adaptive mode, for any offset in [−400, +400] Hz at 20 dB SNR, bytes are decoded without error and \|offsetHz − true offset\| ≤ 20. |
@@ -224,9 +205,10 @@ These notes are for the mathematician to check and extend.
 
 ## Error handling
 - Bad sample rate (outside 8-96 kHz) or byte > 127: typed `ModemError`.
-- Non-finite samples (NaN, ∞) in input are replaced with 0 and counted in `diag`.
+- Non-finite samples (NaN, ∞) in input are replaced with 0 and counted in `diag.nonFiniteCount`.
 - The demodulator never throws on any input.
 
 ## Testing
 - Property tests M1-M13 in `tests/properties/v23-modem.test.ts` with seeded RNG.
+- Two modes with identical test names: fast (default) and slow (`NEOMINITEL_SLOW=1`: more cases, enables the Monte Carlo properties M6 and M10).
 - Calibration script `scripts/calibrate-modem.ts`: BER vs Eb/N0 for both threshold modes, SNR estimator bias, written to `docs/calibration.md`.

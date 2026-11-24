@@ -1,111 +1,113 @@
-# Répartition des tâches
+# Task split
 
-Deux rôles. Mettez vos prénoms :
+Two roles. Put your first names here:
 
-- **A — Développement** : ________ (le site, le Minitel à l'écran, le son, le micro, les services, la mise en ligne)
-- **B — Maths, signal et Kiro** : ________ (le cerveau du modem, la théorie, 3615 MATHS, le réglage des niveaux, les hooks Kiro)
+- **A — Development**: ________ (the site, the on-screen Minitel, sound, microphone, services, deployment)
+- **B — Math, signal and Kiro**: ________ (the modem brain, the theory, 3615 MATHS, level tuning, the Kiro hooks)
 
-## Outils
+## Tools
 
-- **B travaille dans Kiro.** Il exécute ses tâches depuis les fichiers `tasks.md`, et Kiro coche les cases tout seul. C'est son travail que le jury verra dans la partie « comment on a utilisé Kiro ».
-- **A travaille dans un autre éditeur** (en attendant ses crédits Kiro). Son assistant IA lit `AGENTS.md`, qui le renvoie vers les mêmes règles (`.kiro/steering/`) et les mêmes specs. A coche lui-même les cases `[x]` dans les `tasks.md` quand il finit une tâche, pour que Kiro voie l'avancement.
-- Si A obtient ses crédits en cours de route, il passe sur Kiro. Rien d'autre ne change.
+- **B works in Kiro.** B runs tasks from the `tasks.md` files. Kiro is expected to tick the boxes as tasks complete, but this has not been verified yet: until it has been observed, B ticks the boxes by hand when a task is done. This is the work the jury will see in the "how we used Kiro" part.
+- **A works in another editor** (while waiting for Kiro credits). A's AI assistant reads `AGENTS.md`, which points to the same rules (`.kiro/steering/`) and the same specs. A ticks the `[x]` boxes in `tasks.md` when a task is done, so that Kiro sees the progress.
+- If A gets credits along the way, A switches to Kiro. Nothing else changes.
 
-## Hooks Kiro à créer (B, J1, environ 30 min)
+## Kiro hooks and manual check (B, J1, about 30 min)
 
-Dans Kiro, panneau **Agent Hooks**, décrire chaque hook en une phrase :
+In Kiro, **Agent Hooks** panel, describe each of the four hooks in one sentence:
 
-1. Quand un fichier de `src/modem/` est enregistré, lancer les tests de `tests/properties/v23-modem.test.ts`.
-2. Quand un fichier de `content/pages/` est enregistré, lancer le test de contenu (A6 : taille, caractères autorisés, pages assez différentes).
-3. Quand `content/fantome/levels.json` change, relancer `scripts/generate-transmissions.ts --verify-only`.
-4. Quand un `design.md` change, vérifier que chaque propriété (M1, V3, H2…) a un test du même nom, et le signaler sinon.
-5. Avant un commit ou sur demande, vérifier qu'aucun code des fantômes n'apparaît en clair dans `public/` (H4).
+1. When a file in `src/modem/` is saved, run the fast tests of `tests/properties/v23-modem.test.ts`.
+2. When a file in `content/pages/` is saved, run the content test (A6: size, allowed characters, pages different enough).
+3. When `content/fantome/levels.json` changes, rerun `scripts/generate-transmissions.ts --verify-only`.
+4. When a `design.md` changes, check that every property (M1, V3, H2…) has a test with the same name, and report it otherwise.
 
-Les hooks 2 et 3 surveillent les dossiers de A. Ils tourneront chez B à chaque `pull`, et chez A dès qu'il aura Kiro.
+Manual check (not a hook): before a commit or on request, check that no ghost code appears in clear text in `public/` (H4). It becomes automatic only if a real Git hook is installed.
 
-Les numéros renvoient aux fichiers `tasks.md` de chaque spec dans `.kiro/specs/`. Par exemple, « modem 5 » = tâche 5 de `v23-modem/tasks.md`.
+Hooks 2 and 3 watch A's folders. They only fire once the watched files exist.
+
+The numbers refer to the `tasks.md` files of each spec in `.kiro/specs/`. For example, "modem 5" = task 5 of `v23-modem/tasks.md`.
 
 ---
 
-## Le principe pour ne pas se marcher dessus
+## How not to step on each other
 
-**Chacun a ses dossiers.** Tant que chacun reste dans les siens, git ne crée presque jamais de conflit.
+**Each person has their own folders.** As long as everyone stays in theirs, git almost never creates conflicts.
 
-| | A touche | B touche |
+| | A touches | B touches |
 |---|---|---|
-| Code | `src/videotex/`, `src/ui/`, `src/audio/`, `src/workers/`, `src/services/`, `src/fantome/`, `scripts/` | `src/modem/` |
-| Contenu | `content/pages/` (sauf MATHS), `content/fantome/` | `content/pages/maths.ts` |
+| Code | `src/videotex/`, `src/ui/`, `src/audio/`, `src/workers/`, `src/services/`, `src/fantome/`, `scripts/` (except B's three files) | `src/modem/`, `prototypes/`, `scripts/calibrate-modem.ts`, `scripts/montecarlo-ber.ts`, `scripts/bench-modem.ts`, `tests/helpers/modem-*.ts`, `tests/properties/v23-modem.test.ts` |
+| Content | `content/pages/` (except MATHS), `content/fantome/` | `content/pages/maths.ts` |
+| Data | reads `public/data/ber-curve3.json` | generates `public/data/ber-curve3.json` |
 | Docs | `README.md`, `docs/demo-checklist.md` | `docs/math.md`, `docs/calibration.md` |
 
-**Le contrat entre vous**, ce sont les interfaces TypeScript du fichier `v23-modem/design.md` (section « Interfaces ») : `modulate()`, `StreamingDemodulator`, `DemodEvent`. Le J1, vous les relisez ensemble et vous ne les changez plus sans vous prévenir.
+**The contract between you** is the TypeScript interfaces of `v23-modem/design.md` (section "Interfaces"): `modulate()`, `StreamingDemodulator`, `DemodEvent`. On J1 you review them together. You change them, or property M4, only with the written approval of both.
 
-**A n'attend pas B.** Tant que le vrai démodulateur n'est pas prêt, A utilise un faux démodulateur qui renvoie directement les bons octets. Quand B livre le vrai (vers J3), A le branche à la place.
+**A does not wait for B.** Until the real demodulator is ready, A uses a fake demodulator that returns the right bytes directly. When B delivers the real one (around J3), A plugs it in instead. Until task 8 (J5), the real demodulator only accepts `threshold: 'fixed'`, which A passes explicitly.
 
-**Routine git** : `pull` avant de commencer, `commit` + `push` à chaque tâche terminée.
+**Git routine**: `pull` before starting, `commit` + `push` after each finished task.
 
 ---
 
-## A — Développement
+## A — Development
 
-| Jours | Tâches | Résultat visible |
+| Days | Tasks | Visible result |
 |---|---|---|
-| **J1** (23 nov) | modem 1 : créer le projet (Vite, TypeScript, tests) et le pousser sur GitHub. Faux démodulateur. | B peut cloner et coder dès le soir |
-| **J2** | videotex 1, 2, 3 : tables de codes, modèle d'écran, décodeur | Des octets donnent un écran |
-| **J3** | videotex 4, 5, 7 : encodeur, touches, police et rendu. app 1 : le Minitel dessiné, l'écran de départ | Une page s'affiche dans le Minitel |
-| **J4** | app 2, 3 : worker, lecture du son, page qui se dessine au rythme du son. Brancher le vrai modem de B | **Clic sur Connexion → SOMMAIRE se dessine** |
-| **J5** | app 4, 5, 6 : routeur, services, clavier Minitel, test de bout en bout | On navigue dans les 3615 |
-| **J6** | app 7, 8 : mode Écoute (micro) et mode Serveur (haut-parleur) | **Premier test téléphone → ordinateur** (avec B) |
-| **J7** | videotex 6 + app 10 : vote majoritaire. app 9 : le HUD (graphiques) | Répétition répare une page abîmée |
-| **J8** | app 11.2 et 11.3 : l'interface du banc d'essai et de la page Vote (avec B). app 13 : réglages du simulateur | 3615 MATHS fonctionne |
-| **J9** | fantome 1, 2, 3 : histoire, pages, générateur et vérificateur des niveaux | Les fichiers son des niveaux existent |
-| **J10** | fantome 4, 6 : le service 3615 FANTOME, la saisie des codes | **Les niveaux 1 à 4 se jouent** |
-| **J11** | app 12, 14, 15 : mode Fichier, accessibilité, finitions, mise en ligne | Le site est en ligne |
-| **J12** (4 déc) | Vidéo, README, soumission **avant 23h** (avec B) | C'est rendu |
+| **J1** (23 Nov) | modem 1: create the project (Vite, TypeScript, tests) and push it to GitHub. Fake demodulator. | B can clone and code that evening |
+| **J2** | videotex 1, 2, 3: code tables, screen model, decoder | Bytes give a screen |
+| **J3** | videotex 4, 5, 7: encoder, keys, font and rendering. app 1: the drawn Minitel, the start screen | A page shows in the Minitel |
+| **J4** | app 2, 3: worker, sound playback, page drawing at the pace of the sound. Plug in B's real modem | **Click on Connexion → SOMMAIRE draws itself** |
+| **J5** | app 4, 5, 6: router, services, Minitel keyboard, end-to-end test | We navigate the 3615 services |
+| **J6** | app 7, 8: Écoute mode (microphone) and Serveur mode (speaker) | **First phone → computer test** (with B) |
+| **J7** | videotex 6 + app 10: majority vote. app 9: the HUD (charts) | Répétition repairs a damaged page |
+| **J8** | app 11.2 and 11.3: UI of the test bench and the Vote page (with B). app 13: simulator settings | 3615 MATHS works |
+| **J9** | fantome 1, 2, 3: story, pages, level generator and checker | The level sound files exist |
+| **J10** | fantome 4, 6: the 3615 FANTOME service, code entry | **Levels 1 to 4 are playable** |
+| **J11** | app 12, 14, 15: Fichier mode, accessibility, polish, deployment | The site is online |
+| **J12** (4 Dec) | Video, README, submission **before 23:00 Paris time** (with B) | Submitted |
 
-Si le temps le permet (dans cet ordre) : app 17 (voie retour dans le site, quand B a fini modem 14), app 16 (3615 LIBRE), videotex 8 (double taille).
+If time allows (in this order): app 17 (backward channel in the site, when B has finished modem 14), app 16 (3615 LIBRE), videotex 8 (double size).
 
 ---
 
-## B — Maths, signal et Kiro
+## B — Math, signal and Kiro
 
-| Jours | Tâches | Résultat visible |
+| Days | Tasks | Visible result |
 |---|---|---|
-| **J1** (23 nov) | Lire `v23-modem` en entier. Relire les interfaces avec A. Créer les 5 hooks Kiro. Commencer `docs/math.md` : ce que fait le modem, en mots simples | Le contrat est figé, Kiro est prêt |
-| **J2** | modem 2, 3, 4 : constantes, mise en trames, modulateur, fichiers WAV | Un texte devient un son de modem écoutable |
-| **J3** | modem 5, 6 : discriminateur (lire la fréquence), UART (relire les lettres) | **Son → texte qui marche** (test M1), livré à A |
-| **J4** | modem 7 : démodulateur en continu, détection de porteuse et du son de connexion | A branche le vrai modem |
-| **J5** | modem 8 : seuil adaptatif (l'« accord automatique ») | Un signal décalé de 380 Hz se décode |
-| **J6** | modem 9 : simulateur de ligne (bruit, décalage, ronflement). Premier test téléphone → ordinateur (avec A) | On peut abîmer le signal volontairement |
-| **J7** | modem 10 : estimation du SNR (M2M4), séquence PN9, mesure du taux d'erreur | Le taux d'erreur mesuré s'affiche |
-| **J8** | modem 11 : les trois courbes théoriques (dont la formule de Marcum pour h = 2/3), simulation Monte Carlo. Interface du banc d'essai (avec A) | **Les points mesurés tombent sur la courbe** |
-| **J9** | app 11.1 : les 6 pages explicatives de 3615 MATHS. Vérifier les formules du vote (spec videotex, « Math notes ») | 3615 MATHS a du contenu |
-| **J10** | fantome 5 : régler la difficulté des niveaux avec deux vrais appareils. modem 12 : calibration | Les niveaux sont durs mais faisables |
-| **J11** | modem 13 : performances. Relecture de tout le contenu MATHS. Répétition de la démo | Tout tient en temps réel |
-| **J12** (4 déc) | Vidéo : la séquence 3615 MATHS et la séquence « comment on a utilisé Kiro » (specs, tests, hooks en action) (avec A) | C'est rendu |
+| **J1** (23 Nov) | Read `v23-modem` in full. Review the interfaces with A. Create the 4 Kiro hooks and the manual check list. Numerical prototypes E1 and E3a (`prototypes/dsp/`). Start `docs/math.md`: what the modem does, in plain words | The contract is frozen, Kiro is ready |
+| **J2** | modem 2, 3, 4: constants, framing, modulator, WAV files. Prototypes E7, E2 (morning), then E3b and E3c | A text becomes a listenable modem sound |
+| **J3** | modem 5, 6: discriminator (read the frequency), UART (read the letters back). First benchmark | **Sound → text works** (test M1), delivered to A |
+| **J4** | modem 7: streaming demodulator, carrier detection and connection tone | A plugs in the real modem |
+| **J5** | modem 8: adaptive threshold (the "automatic tuning") | A signal shifted by 380 Hz decodes |
+| **J6** | modem 9: line simulator (noise, offset, hum). First phone → computer test (with A) | We can damage the signal on purpose |
+| **J7** | modem 10: SNR estimation (M2M4), PN9 sequence, error-rate measurement | The measured error rate shows |
+| **J8** | modem 11: the three theory curves (including the Marcum formula for h = 2/3), Monte Carlo simulation. Test bench UI (with A) | **Measured points land on the curve** |
+| **J9** | app 11.1: the 6 explanation pages of 3615 MATHS. Check the vote formulas (videotex spec, "Math notes") | 3615 MATHS has content |
+| **J10** | fantome 5: tune level difficulty with two real devices. modem 12: calibration | Levels are hard but doable |
+| **J11** | modem 13: performance. Review of all the MATHS content. Demo rehearsal | Everything holds in real time |
+| **J12** (4 Dec) | Video: the 3615 MATHS sequence and the "how we used Kiro" sequence (specs, tests, hooks in action) (with A) | Submitted |
 
-Si le temps le permet (dans cet ordre) : modem 14 + fantome 7 (voie retour et niveau 5), modem 15 (deuxième démodulateur), videotex 9 (image en mosaïque).
+If time allows (in this order): modem 14 + fantome 7 (backward channel and level 5), modem 15 (second demodulator), videotex 9 (mosaic image).
 
 ---
 
-## Ce que vous faites ensemble
+## What you do together
 
-| Quand | Quoi |
+| When | What |
 |---|---|
-| J1 | Relire les interfaces du modem (30 min) |
-| J6 | Premier test réel : un téléphone joue, un ordinateur écoute |
-| J8 | Banc d'essai de 3615 MATHS (B donne les calculs, A fait l'affichage) |
-| J10 | Tester les niveaux fantômes avec deux appareils |
-| Avant J11 | videotex 1.3 : vérifier les codes marqués « (verify) » dans la norme STUM1B (celui qui a le temps) |
-| J12 | Tourner la vidéo de 3 minutes et soumettre |
+| J1 | Review the modem interfaces (30 min) and sign the Eb/N0 convention |
+| J6 | First real test: a phone plays, a computer listens |
+| J8 | MATHS test bench (B gives the calculations, A does the display) |
+| J10 | Test the ghost levels with two devices |
+| Before J11 | videotex 1.3: check the codes marked "(verify)" in the STUM1B standard (whoever has time) |
+| J12 | Shoot the 3-minute video and submit |
 
-**Point quotidien de 10 minutes** : ce que j'ai fini, ce que je fais, ce qui me bloque.
+**Daily 10-minute check-in**: what I finished, what I am doing, what blocks me.
 
-## Points de contrôle (si l'un n'est pas atteint, on coupe un bonus)
+## Checkpoints (if one is missed, we cut a bonus)
 
-| Date | Il faut que… |
+| Date | What must be true |
 |---|---|
-| J4 (26 nov) | SOMMAIRE se dessine en mode Seul, avec le vrai modem |
-| J6 (28 nov) | Une page passe d'un téléphone à un ordinateur par le son |
-| J8 (30 nov) | 3615 MATHS montre des points mesurés sur la courbe |
-| J10 (2 déc) | Les niveaux 1 à 4 de 3615 FANTOME se jouent |
-| J11 (3 déc) | Le site est en ligne, plus aucune nouvelle fonction après ça |
+| J4 (26 Nov) | SOMMAIRE draws itself in Seul mode, with the real modem |
+| J6 (28 Nov) | A page goes from a phone to a computer by sound |
+| J8 (30 Nov) | 3615 MATHS shows measured points on the curve |
+| J10 (2 Dec) | Levels 1 to 4 of 3615 FANTOME are playable |
+| J11 (3 Dec) | The site is online, no new feature after that |

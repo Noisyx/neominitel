@@ -257,7 +257,7 @@ describe('Videotex Property Tests', () => {
     error: fc.boolean(),
   });
 
-  it('V2: byte-by-byte decoding and one-shot decoding give the same screen', () => {
+  it('V2 byte-by-byte decoding and one-shot decoding give the same screen', () => {
     fc.assert(
       fc.property(fc.array(arbRxByte, { minLength: 0, maxLength: 300 }), (rxBytes) => {
         const oneShotScreen = decodeBytes(rxBytes);
@@ -276,7 +276,7 @@ describe('Videotex Property Tests', () => {
     );
   });
 
-  it('V5: for every 6-bit pattern, the G1 code is in 0x20-0x3F ∪ 0x60-0x7F and decodes back to the same pattern', () => {
+  it('V5 for every 6-bit pattern, the G1 code is in 0x20-0x3F ∪ 0x60-0x7F and decodes back to the same pattern', () => {
     const arbBit = fc.constantFrom(0 as const, 1 as const);
     const arbMosaicBlocks: fc.Arbitrary<MosaicBlocks> = fc.tuple(
       arbBit,
@@ -300,7 +300,7 @@ describe('Videotex Property Tests', () => {
     );
   });
 
-  it('V6: for any byte sequence (0-127, random error flags), the decoder never throws and the cursor stays inside the screen', () => {
+  it('V6 for any byte sequence (0-127, random error flags), the decoder never throws and the cursor stays inside the screen', () => {
     fc.assert(
       fc.property(fc.array(arbRxByte, { minLength: 0, maxLength: 500 }), (rxBytes) => {
         const decoder = createVideotexDecoder();

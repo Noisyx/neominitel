@@ -1,0 +1,23 @@
+{
+  "id": "e2-discriminator",
+  "kind": "simulation",
+  "note": "Simulation result. Never to be reported as a hardware measurement.",
+  "node": "v24.20.0",
+  "commit": "6797a2f",
+  "date": "2026-11-23T21:47:40.206Z",
+  "experiment": "E2 discriminator accuracy and alignment (clean)",
+  "seeds": "none (deterministic)",
+  "filter": {
+    "window": "hamming",
+    "convention": "c1",
+    "cutoffHz": 1100,
+    "transitionHz": 400
+  },
+  "parameters": {
+    "tonesHz": "1000..2500 step 100",
+    "amplitude": 0.5,
+    "step": "1300 -> 2100 Hz, phase continuous",
+    "crossingHz": 1700
+  },
+  "runtimeMs": 1000
+}

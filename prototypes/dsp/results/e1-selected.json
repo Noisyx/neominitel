@@ -1,0 +1,10 @@
+{
+  "status": "Prototype result (E1), simulation only. Candidate filter for J3-1; final choice is decision U2.",
+  "rule": "cheapest candidate (taps at 48 kHz) meeting >= 46 dB for |f| >= 1380 Hz and ripple <= 0.5 dB over [-950, 850] Hz at all 8 rates",
+  "selected": {
+    "window": "hamming",
+    "convention": "c1",
+    "cutoffHz": 1100,
+    "transitionHz": 400
+  }
+}

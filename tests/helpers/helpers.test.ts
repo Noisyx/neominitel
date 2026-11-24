@@ -8,7 +8,7 @@ import {
   measureSignalPower,
   resample,
 } from './index';
-import { createDemodulator, modulate, type DemodEvent } from '../../src/modem';
+import { createDemodulator, modulate, wilson95, wilsonInterval, type DemodEvent } from '../../src/modem';
 
 describe('J1 scaffold and test helpers', () => {
   it('createRng produces deterministic sequences for identical seeds', () => {
@@ -56,6 +56,24 @@ describe('J1 scaffold and test helpers', () => {
     expect(measureSignalPower(out)).toBeCloseTo(0.5, 1);
   });
 
+  it('createDemodulator enforces sampleRate range and fixed threshold mode before task 8', () => {
+    expect(createDemodulator({ sampleRate: 4000, threshold: 'fixed' })).toEqual({
+      ok: false,
+      error: { kind: 'bad-sample-rate', sampleRate: 4000 },
+    });
+    expect(createDemodulator({ sampleRate: 48000 }).ok).toBe(false);
+    expect(createDemodulator({ sampleRate: 48000, threshold: 'adaptive' })).toEqual({
+      ok: false,
+      error: {
+        kind: 'bad-option',
+        option: 'threshold',
+        reason: "Before task 8 lands, only threshold: 'fixed' is accepted",
+      },
+    });
+    expect(wilsonInterval(0, 0, 1.96)).toEqual({ lo: 0, hi: 1 });
+    expect(Number.isNaN(wilson95(11, 10).lo)).toBe(true);
+  });
+
   it('fake modulator + demodulator round-trips arbitrary 7-bit bytes and is chunk-invariant', () => {
     fc.assert(
       fc.property(arbBytes7(1, 30), arbStandardSampleRate(), (bytes, sampleRate) => {
@@ -63,20 +81,26 @@ describe('J1 scaffold and test helpers', () => {
         expect(modRes.ok).toBe(true);
         if (!modRes.ok) return;
 
-        const demodWhole = createDemodulator({ sampleRate, threshold: 'fixed' });
-        const eventsWhole = demodWhole.push(modRes.value);
+        const demodWholeRes = createDemodulator({ sampleRate, threshold: 'fixed' });
+        expect(demodWholeRes.ok).toBe(true);
+        if (!demodWholeRes.ok) return;
+
+        const eventsWhole = demodWholeRes.value.push(modRes.value);
         const charsWhole = eventsWhole
           .filter((e): e is Extract<DemodEvent, { type: 'char' }> => e.type === 'char')
           .map((e) => e.value);
 
         expect(Uint8Array.from(charsWhole)).toEqual(bytes);
 
-        const demodChunked = createDemodulator({ sampleRate, threshold: 'fixed' });
+        const demodChunkedRes = createDemodulator({ sampleRate, threshold: 'fixed' });
+        expect(demodChunkedRes.ok).toBe(true);
+        if (!demodChunkedRes.ok) return;
+
         const eventsChunked: DemodEvent[] = [];
         const step = 137;
         for (let offset = 0; offset < modRes.value.length; offset += step) {
           eventsChunked.push(
-            ...demodChunked.push(modRes.value.subarray(offset, offset + step)),
+            ...demodChunkedRes.value.push(modRes.value.subarray(offset, offset + step)),
           );
         }
         expect(eventsChunked).toEqual(eventsWhole);

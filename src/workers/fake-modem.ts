@@ -20,9 +20,12 @@ export function fakeModulate(
   return modulate(bytes, options);
 }
 
-export function createFakeDemodulator(options: DemodOptions): StreamingDemodulator {
+export function createFakeDemodulator(
+  options: DemodOptions,
+): Result<StreamingDemodulator, ModemError> {
   return createDemodulator({
     ...options,
     channel: options.channel ?? CHANNELS.forward.id,
+    threshold: options.threshold ?? 'fixed',
   });
 }

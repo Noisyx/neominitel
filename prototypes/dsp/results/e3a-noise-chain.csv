@@ -1,0 +1,64 @@
+fs,quantity,measured,se,expected,relDev,pass
+8000,a1 generator variance (seeds 1-5),1.000120146,0.0002843235779,1,0.0001201457163,true
+8000,a2 one-sided PSD 300-3400 Hz,0.0002500704988,9.544288902e-8,0.0002500000000,0.0002819952621,true
+8000,a3 B_n taps vs integral of |H|^2 [Hz],2100.079268,0,2100.079268,-1.110223025e-15,true
+8000,a4 E|v|^2 raw mix,1.000286458,0.0002198829936,1,0.0002864575208,true
+8000,a5 E|y|^2 vs N0*Bn/2 (gain 1),0.2626339414,0.00007801807219,0.2625099085,0.0004724885469,true
+8000,a5 2*E|y|^2 vs N0*Bn (power-preserving),0.5252678829,0.0001560361444,0.5250198170,0.0004724885469,true
+8000,a6 Re C_p,1.935880638e-8,4.152635060e-8,8.747525909e-8,NaN,true
+8000,a6 Im C_p,-4.226040293e-9,6.308275840e-8,-1.203993651e-7,NaN,true
+8000,a6 rho_p theoretical,5.669187901e-7,0,0.01000000000,NaN,true
+8000,a6 rho_p measured,7.544611951e-8,1.537653117e-7,0.01000000000,NaN,true
+8000,a6 positive control rho_p (unfiltered mix),1,0.0002198200245,1,0,true
+8000,a6 negative illustration |mean y^2| / E|y|^2 (not a test),0.0001592026717,NaN,NaN,NaN,n/a
+8000,a6 Var(I') - Var(Q') (= Re C_p),1.935868441e-8,0.00005516711573,1.935880638e-8,NaN,identity
+8000,"a6 2 Cov(I',Q') (= Im C_p)",-4.225860502e-9,6.308281208e-8,-4.226040293e-9,NaN,identity
+8000,a6 identity max per-seed gap (code check),2.347549013e-12,0,0,NaN,true
+8000,"sensitivity E|y|^2 (5 N_taps exclusion), criterion |diff| <= 1 SE",0.2626357191,0.00007801807219,0.2626339414,0.000006768433035,true
+8000,"sensitivity Re C_p (5 N_taps exclusion), criterion |diff| <= 1 SE",4.199118219e-8,4.152635060e-8,1.935880638e-8,NaN,true
+8000,"sensitivity Im C_p (5 N_taps exclusion), criterion |diff| <= 1 SE",-1.520850414e-8,6.308275840e-8,-4.226040293e-9,NaN,true
+8000,"a7 tone 1300 Hz power vs A^2/4 (passband gain 0.0010 dB, image att 86.1 dB)",0.06251412259,0,0.06250000000,0.0002259614278,true
+8000,"a7 tone 1700 Hz power vs A^2/4 (passband gain -0.0214 dB, image att 66.5 dB)",0.06219246766,0,0.06250000000,-0.004920517448,true
+8000,"a7 tone 2100 Hz power vs A^2/4 (passband gain -0.0099 dB, image att 67.0 dB)",0.06235727373,0,0.06250000000,-0.002283620316,true
+16000,a1 generator variance (seeds 1-5),0.9997927522,0.0004900925773,1,-0.0002072478062,true
+16000,a2 one-sided PSD 300-3400 Hz,0.0001250270792,5.170961820e-8,0.0001250000000,0.0002166336698,true
+16000,a3 B_n taps vs integral of |H|^2 [Hz],2099.360205,0,2099.360205,-2.220446049e-16,true
+16000,a4 E|v|^2 raw mix,1.000164825,0.0002032603631,1,0.0001648245421,true
+16000,a5 E|y|^2 vs N0*Bn/2 (gain 1),0.1312161632,0.00006416751219,0.1312100128,0.00004687481392,true
+16000,a5 2*E|y|^2 vs N0*Bn (power-preserving),0.2624323265,0.0001283350244,0.2624200256,0.00004687481392,true
+16000,a6 Re C_p,5.312795914e-8,1.748891753e-8,3.693510644e-8,NaN,true
+16000,a6 Im C_p,-7.060955765e-8,2.670015845e-8,-5.083681275e-8,NaN,true
+16000,a6 rho_p theoretical,4.789097644e-7,0,0.01000000000,NaN,true
+16000,a6 rho_p measured,6.734271530e-7,1.452338849e-7,0.01000000000,NaN,true
+16000,a6 positive control rho_p (unfiltered mix),1,0.0002032268663,1,0,true
+16000,a6 negative illustration |mean y^2| / E|y|^2 (not a test),0.001149042238,NaN,NaN,NaN,n/a
+16000,a6 Var(I') - Var(Q') (= Re C_p),5.312788684e-8,0.00004537328469,5.312795914e-8,NaN,identity
+16000,"a6 2 Cov(I',Q') (= Im C_p)",-7.060948487e-8,2.670015858e-8,-7.060955765e-8,NaN,identity
+16000,a6 identity max per-seed gap (code check),4.887661813e-13,0,0,NaN,true
+16000,"sensitivity E|y|^2 (5 N_taps exclusion), criterion |diff| <= 1 SE",0.1312156393,0.00006416751219,0.1312161632,-0.000003993067035,true
+16000,"sensitivity Re C_p (5 N_taps exclusion), criterion |diff| <= 1 SE",6.910829393e-8,1.748891753e-8,5.312795914e-8,NaN,true
+16000,"sensitivity Im C_p (5 N_taps exclusion), criterion |diff| <= 1 SE",-7.893226988e-8,2.670015845e-8,-7.060955765e-8,NaN,true
+16000,"a7 tone 1300 Hz power vs A^2/4 (passband gain 0.0008 dB, image att 83.6 dB)",0.06251213766,0,0.06250000000,0.0001942026156,true
+16000,"a7 tone 1700 Hz power vs A^2/4 (passband gain -0.0242 dB, image att 72.7 dB)",0.06215285976,0,0.06250000000,-0.005554243877,true
+16000,"a7 tone 2100 Hz power vs A^2/4 (passband gain -0.0113 dB, image att 71.0 dB)",0.06233690576,0,0.06250000000,-0.002609507820,true
+48000,a1 generator variance (seeds 1-5),1.000601782,0.0003970528972,1,0.0006017822613,true
+48000,a2 one-sided PSD 300-3400 Hz,0.00004172287313,3.350157809e-8,0.00004166666667,0.001348955038,true
+48000,a3 B_n taps vs integral of |H|^2 [Hz],2099.008279,0,2099.008279,-2.331468352e-15,true
+48000,a4 E|v|^2 raw mix,1.000146441,0.0002184593074,1,0.0001464409883,true
+48000,a5 E|y|^2 vs N0*Bn/2 (gain 1),0.04375911919,0.00003564001421,0.04372933915,0.0006810080788,true
+48000,a5 2*E|y|^2 vs N0*Bn (power-preserving),0.08751823837,0.00007128002842,0.08745867831,0.0006810080788,true
+48000,a6 Re C_p,2.414473946e-8,1.499574604e-8,1.095275324e-8,NaN,true
+48000,a6 Im C_p,-3.665734771e-8,1.607364201e-8,-1.507517153e-8,NaN,true
+48000,a6 rho_p theoretical,4.261197893e-7,0,0.01000000000,NaN,true
+48000,a6 rho_p measured,0.000001003094413,2.585976694e-7,0.01000000000,NaN,true
+48000,a6 positive control rho_p (unfiltered mix),1,0.0002184273207,1,0,true
+48000,a6 negative illustration |mean y^2| / E|y|^2 (not a test),0.001156396934,NaN,NaN,NaN,n/a
+48000,a6 Var(I') - Var(Q') (= Re C_p),2.414470220e-8,0.00002520129797,2.414473946e-8,NaN,identity
+48000,"a6 2 Cov(I',Q') (= Im C_p)",-3.665717623e-8,1.607361417e-8,-3.665734771e-8,NaN,identity
+48000,a6 identity max per-seed gap (code check),1.606429182e-12,0,0,NaN,true
+48000,"sensitivity E|y|^2 (5 N_taps exclusion), criterion |diff| <= 1 SE",0.04375680314,0.00003564001421,0.04375911919,-0.00005292717671,true
+48000,"sensitivity Re C_p (5 N_taps exclusion), criterion |diff| <= 1 SE",4.918712642e-8,1.499574604e-8,2.414473946e-8,NaN,false
+48000,"sensitivity Im C_p (5 N_taps exclusion), criterion |diff| <= 1 SE",-2.730055410e-8,1.607364201e-8,-3.665734771e-8,NaN,true
+48000,"a7 tone 1300 Hz power vs A^2/4 (passband gain 0.0008 dB, image att 79.8 dB)",0.06251121901,0,0.06250000000,0.0001795041220,true
+48000,"a7 tone 1700 Hz power vs A^2/4 (passband gain -0.0255 dB, image att 76.8 dB)",0.06213350391,0,0.06250000000,-0.005863937441,true
+48000,"a7 tone 2100 Hz power vs A^2/4 (passband gain -0.0120 dB, image att 73.2 dB)",0.06232708088,0,0.06250000000,-0.002766705877,true
