@@ -1,8 +1,8 @@
 // V.23 modulator: bytes -> audio (requirements 2.1 to 2.7, design.md "Modulator").
 import { MAX_FRAME_VALUE, byteToLineBits } from './frame';
-import { renderFsk } from './oscillator';
-import type { ModemError, ModulateOptions, Result } from './types';
-import { CHANNELS, FRAME, SAMPLE_RATE_MAX_HZ, SAMPLE_RATE_MIN_HZ, type ChannelId } from './v23';
+import { renderFsk, renderTone } from './oscillator';
+import type { ConnectionSequenceOptions, ModemError, ModulateOptions, Result } from './types';
+import { ANSWER_TONE_HZ, CHANNELS, FRAME, SAMPLE_RATE_MAX_HZ, SAMPLE_RATE_MIN_HZ, type ChannelId } from './v23';
 
 /** Defaults of ModulateOptions (design.md "Interfaces"). */
 export const MODULATE_DEFAULTS = {
@@ -172,4 +172,62 @@ export function modulate(bytes: Uint8Array, o: ModulateOptions): Result<Float32A
     rampOut,
   );
   return { ok: true, value: out };
+}
+
+/**
+ * Default durations of the connection sequence. PROVISIONAL (decisions U5 and T3-3): they match
+ * Role A's fake modem and are not normative V.25 values; task 12 checks them against a reference
+ * recording and records the result in docs/calibration.md.
+ */
+export const CONNECTION_DEFAULTS = {
+  answerToneMs: 700,
+  silenceMs: 150,
+  carrierMs: 300,
+} as const;
+
+/** Peak amplitude of both tones of the connection sequence (same default as modulate()). */
+const CONNECTION_AMPLITUDE = MODULATE_DEFAULTS.amplitude;
+
+/**
+ * Connection sequence (requirement 3.1): a 2100 Hz answer tone, a silence, then the forward mark
+ * carrier. Each tone starts at phase 0 and has raised-cosine ramps of MODULATE_DEFAULTS.rampMs at
+ * both ends (clamped to half the tone, and omitted below minRampSamples for that tone).
+ *
+ * Segment boundaries come from cumulative exact durations:
+ *   s1 = round(fs a), s2 = round(fs (a + b)), N = round(fs (a + b + c)),
+ * so each segment is within 1 sample of its exact length and the total is exactly round(fs total).
+ *
+ * Limit: a tone shorter than 2 * minRampSamples cannot hold a safe ramp, so it has none and may end
+ * abruptly (a click). Tones of 1 ms or more always keep their ramps. The spec does not require M3
+ * for the connection sequence.
+ *
+ * The contract returns a Float32Array, not a Result (decision T3-2): any invalid input (sample rate
+ * outside 8000..96000 Hz or not finite, a duration that is negative or not finite) returns an
+ * empty Float32Array. Never throws. Zero durations are valid and give empty segments.
+ */
+export function connectionSequence(o: ConnectionSequenceOptions): Float32Array {
+  const sampleRate = o?.sampleRate;
+  if (!isValidSampleRate(sampleRate)) return new Float32Array(0);
+  const answerToneMs = o.answerToneMs ?? CONNECTION_DEFAULTS.answerToneMs;
+  const silenceMs = o.silenceMs ?? CONNECTION_DEFAULTS.silenceMs;
+  const carrierMs = o.carrierMs ?? CONNECTION_DEFAULTS.carrierMs;
+  if (!isNonNegativeFinite(answerToneMs) || !isNonNegativeFinite(silenceMs) || !isNonNegativeFinite(carrierMs)) {
+    return new Float32Array(0);
+  }
+
+  const s1 = Math.round((sampleRate * answerToneMs) / 1000);
+  const s2 = Math.round((sampleRate * (answerToneMs + silenceMs)) / 1000);
+  const length = Math.round((sampleRate * (answerToneMs + silenceMs + carrierMs)) / 1000);
+  const out = new Float32Array(length); // the silence stays at 0
+
+  const markHz = CHANNELS.forward.markHz;
+  renderTone(out, 0, s1, sampleRate, ANSWER_TONE_HZ, CONNECTION_AMPLITUDE, toneRampSamples(sampleRate, s1, ANSWER_TONE_HZ));
+  renderTone(out, s2, length - s2, sampleRate, markHz, CONNECTION_AMPLITUDE, toneRampSamples(sampleRate, length - s2, markHz));
+  return out;
+}
+
+/** Ramp of a tone burst of `length` samples: rampMs, at most half the burst, 0 below R_min. */
+export function toneRampSamples(sampleRate: number, length: number, freqHz: number): number {
+  const r = Math.min(Math.round((sampleRate * MODULATE_DEFAULTS.rampMs) / 1000), Math.floor(length / 2));
+  return r >= minRampSamples(sampleRate, freqHz) ? r : 0;
 }

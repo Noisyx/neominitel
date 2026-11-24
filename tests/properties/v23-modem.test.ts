@@ -19,9 +19,12 @@ import {
 } from '../../src/modem/frame';
 import { envelope, raisedCosine, renderFsk, renderTone, type FskTimeline } from '../../src/modem/oscillator';
 import {
+  CONNECTION_DEFAULTS,
   MODULATE_DEFAULTS,
   buildLineBits,
+  connectionSequence,
   effectiveRampSamples,
+  toneRampSamples,
   lineBitCount,
   minRampSamples,
   modulate,
@@ -768,3 +771,164 @@ describe('v23-modem task 3.4: modulator properties', () => {
     expect(peak).toBeGreaterThan(0.49);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// Task 3.3: connectionSequence() (I3)
+// ---------------------------------------------------------------------------------------------
+
+/** Expected segment boundaries from cumulative exact durations. */
+function connectionBounds(fs: number, a: number, b: number, c: number): [number, number, number] {
+  return [Math.round((fs * a) / 1000), Math.round((fs * (a + b)) / 1000), Math.round((fs * (a + b + c)) / 1000)];
+}
+
+/** Independent reference of one tone burst: A * envelope * sin(2 pi f i / fs), phase 0 at i = 0. */
+function referenceTone(fs: number, f: number, len: number, ramp: number): Float64Array {
+  const r = new Float64Array(len);
+  for (let i = 0; i < len; i++) r[i] = 0.5 * envelope(i, len, ramp, ramp) * Math.sin((2 * Math.PI * f * i) / fs);
+  return r;
+}
+
+describe('v23-modem task 3.3: connection sequence', () => {
+  it('defaults are the provisional 700 / 150 / 300 ms (T3-3, not normative V.25 values)', () => {
+    expect(CONNECTION_DEFAULTS).toEqual({ answerToneMs: 700, silenceMs: 150, carrierMs: 300 });
+  });
+
+  it('default sequence at the 8 rates: segment boundaries, exact total length, tone content, silence of exact zeros', () => {
+    for (const fs of STANDARD_SAMPLE_RATES) {
+      const out = connectionSequence({ sampleRate: fs });
+      const [s1, s2, n] = connectionBounds(fs, 700, 150, 300);
+      expect(out).toBeInstanceOf(Float32Array);
+      // Total = round(fs * 1150 / 1000); e.g. 22050 Hz gives exactly 25357.5 -> 25358 (do not use
+      // fs * 1.15, which is 25357.4999... in floating point).
+      expect(out.length).toBe(n);
+      for (let i = s1; i < s2; i++) expect(out[i]).toBe(0);
+      const answer = out.subarray(0, s1);
+      const carrier = out.subarray(s2, n);
+      const rA = toneRampSamples(fs, s1, ANSWER_TONE_HZ);
+      const rC = toneRampSamples(fs, n - s2, CHANNELS.forward.markHz);
+      expect(rA).toBe(Math.round(fs * 0.005));
+      expect(rC).toBe(Math.round(fs * 0.005));
+      // Interior (outside the ramps) is a pure tone at the right frequency, not at the other one.
+      const ownA = toneFitResidual(answer, fs, ANSWER_TONE_HZ, rA, s1 - rA);
+      const otherA = toneFitResidual(answer, fs, CHANNELS.forward.markHz, rA, s1 - rA);
+      expect(ownA).toBeLessThan(1e-9);
+      expect(otherA).toBeGreaterThan(1e3 * ownA + 1e-6);
+      const ownC = toneFitResidual(carrier, fs, CHANNELS.forward.markHz, rC, carrier.length - rC);
+      const otherC = toneFitResidual(carrier, fs, ANSWER_TONE_HZ, rC, carrier.length - rC);
+      expect(ownC).toBeLessThan(1e-9);
+      expect(otherC).toBeGreaterThan(1e3 * ownC + 1e-6);
+    }
+  });
+
+  it('matches an independent reference sample by sample (ramps, phase 0 per tone), any durations', () => {
+    fc.assert(
+      fc.property(
+        arbStandardSampleRate(),
+        fc.double({ min: 0, max: 1500, noNaN: true }),
+        fc.double({ min: 0, max: 300, noNaN: true }),
+        fc.double({ min: 0, max: 600, noNaN: true }),
+        (fs, a, b, c) => {
+          const out = connectionSequence({ sampleRate: fs, answerToneMs: a, silenceMs: b, carrierMs: c });
+          const [s1, s2, n] = connectionBounds(fs, a, b, c);
+          expect(out.length).toBe(n);
+          // Each segment is within 1 sample of its exact length.
+          expect(Math.abs(s1 - (fs * a) / 1000)).toBeLessThanOrEqual(1);
+          expect(Math.abs(s2 - s1 - (fs * b) / 1000)).toBeLessThanOrEqual(1);
+          expect(Math.abs(n - s2 - (fs * c) / 1000)).toBeLessThanOrEqual(1);
+          const refA = referenceTone(fs, ANSWER_TONE_HZ, s1, toneRampSamples(fs, s1, ANSWER_TONE_HZ));
+          const refC = referenceTone(fs, CHANNELS.forward.markHz, n - s2, toneRampSamples(fs, n - s2, CHANNELS.forward.markHz));
+          let worst = 0;
+          for (let i = 0; i < s1; i++) worst = Math.max(worst, Math.abs(out[i] - refA[i]));
+          for (let i = s1; i < s2; i++) worst = Math.max(worst, Math.abs(out[i]));
+          for (let i = s2; i < n; i++) worst = Math.max(worst, Math.abs(out[i] - refC[i - s2]));
+          expect(worst).toBeLessThanOrEqual(1e-6);
+        },
+      ),
+      { numRuns: SIGNAL_RUNS },
+    );
+  });
+
+  it('documented limit: a tone shorter than 2 R_min samples has no ramp and may end abruptly', () => {
+    // 0.1 ms answer tone at 96 kHz = 10 samples < 2 * R_min (17): no ramp, abrupt end before the
+    // silence. The spec does not require M3 for the connection sequence; this test pins the behaviour.
+    const fs = 96000;
+    const out = connectionSequence({ sampleRate: fs, answerToneMs: 0.1, silenceMs: 10, carrierMs: 10 });
+    const s1 = Math.round(fs * 0.0001);
+    expect(toneRampSamples(fs, s1, ANSWER_TONE_HZ)).toBe(0);
+    expect(minRampSamples(fs, ANSWER_TONE_HZ)).toBeGreaterThan(Math.floor(s1 / 2));
+    const bound = (0.5 * 2 * Math.PI * ANSWER_TONE_HZ) / fs;
+    expect(maxStep(out)).toBeGreaterThan(bound);
+  });
+
+  it('step bound |x[n+1] - x[n]| <= A 2 pi 2100 / fs + 1e-6 over the whole sequence, silences included (tones of 0 or >= 1 ms)', () => {
+    let worstRatio = 0;
+    // Tone durations of 0 or at least 1 ms: 1 ms holds 2 R_min samples at every rate (see the
+    // documented limit above for shorter tones). The silence may be any duration.
+    const arbToneMs = (dflt: number, max: number) =>
+      fc.oneof(fc.constant(dflt), fc.constant(0), fc.double({ min: 1, max: 50, noNaN: true }), fc.double({ min: 1, max, noNaN: true }));
+    fc.assert(
+      fc.property(
+        arbStandardSampleRate(),
+        arbToneMs(700, 1500),
+        fc.oneof(fc.constant(150), fc.constant(0), fc.double({ min: 0, max: 300, noNaN: true })),
+        arbToneMs(300, 600),
+        (fs, a, b, c) => {
+          const out = connectionSequence({ sampleRate: fs, answerToneMs: a, silenceMs: b, carrierMs: c });
+          const bound = (0.5 * 2 * Math.PI * ANSWER_TONE_HZ) / fs;
+          const step = maxStep(out);
+          worstRatio = Math.max(worstRatio, step / bound);
+          expect(step).toBeLessThanOrEqual(bound + 1e-6);
+        },
+      ),
+      { numRuns: SIGNAL_RUNS },
+    );
+    console.log(`connectionSequence worst step / bound = ${worstRatio.toFixed(8)}`);
+  });
+
+  it('each tone starts and ends at 0 with the default ramp; peak <= 0.5; deterministic', () => {
+    const fs = 48000;
+    const a = connectionSequence({ sampleRate: fs });
+    const b = connectionSequence({ sampleRate: fs });
+    expect(a).toEqual(b);
+    const [s1, s2, n] = connectionBounds(fs, 700, 150, 300);
+    for (const i of [0, s1 - 1, s2, n - 1]) expect(Math.abs(a[i])).toBe(0);
+    let peak = 0;
+    for (const v of a) peak = Math.max(peak, Math.abs(v));
+    expect(peak).toBeLessThanOrEqual(0.5 + 1e-7);
+    expect(peak).toBeGreaterThan(0.49);
+  });
+
+  it('zero durations give empty segments; all zero gives an empty array', () => {
+    const fs = 16000;
+    expect(connectionSequence({ sampleRate: fs, answerToneMs: 0, silenceMs: 0, carrierMs: 0 }).length).toBe(0);
+    const noAnswer = connectionSequence({ sampleRate: fs, answerToneMs: 0 });
+    expect(noAnswer.length).toBe(Math.round(fs * 0.45));
+    for (let i = 0; i < Math.round(fs * 0.15); i++) expect(noAnswer[i]).toBe(0);
+    const noSilence = connectionSequence({ sampleRate: fs, silenceMs: 0 });
+    expect(noSilence.length).toBe(Math.round(fs * 1.0));
+    const answerOnly = connectionSequence({ sampleRate: fs, silenceMs: 0, carrierMs: 0 });
+    expect(answerOnly.length).toBe(Math.round(fs * 0.7));
+  });
+
+  it('invalid input returns an empty Float32Array and never throws (decision T3-2)', () => {
+    const invalid: ConnectionSequenceOptionsLike[] = [
+      { sampleRate: 7999 },
+      { sampleRate: 96001 },
+      { sampleRate: Number.NaN },
+      { sampleRate: Infinity },
+      { sampleRate: 48000, answerToneMs: -1 },
+      { sampleRate: 48000, silenceMs: Number.NaN },
+      { sampleRate: 48000, carrierMs: Infinity },
+      { sampleRate: 48000, answerToneMs: -0.001, silenceMs: 0, carrierMs: 0 },
+    ];
+    for (const o of invalid) {
+      const out = connectionSequence(o);
+      expect(out).toBeInstanceOf(Float32Array);
+      expect(out.length).toBe(0);
+    }
+    expect(connectionSequence(undefined as never)).toEqual(new Float32Array(0));
+    expect(connectionSequence({} as never)).toEqual(new Float32Array(0));
+  });
+});
+
+type ConnectionSequenceOptionsLike = Parameters<typeof connectionSequence>[0];
