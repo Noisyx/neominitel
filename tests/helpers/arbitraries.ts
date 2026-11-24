@@ -38,8 +38,8 @@ export function arbAnySampleRate(): fc.Arbitrary<number> {
 }
 
 /**
- * Returns true when `npm run test:slow` (`SLOW_TESTS=1`) is active.
+ * Returns true when `npm run test:slow` (`NEOMINITEL_SLOW=1`, set through cross-env) is active.
  */
 export function isSlowTestsEnabled(): boolean {
-  return process.env.SLOW_TESTS === '1' || process.env.SLOW_TESTS === 'true';
+  return process.env.NEOMINITEL_SLOW === '1' || process.env.NEOMINITEL_SLOW === 'true';
 }

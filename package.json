@@ -11,7 +11,7 @@
     "lint": "eslint --no-error-on-unmatched-pattern src tests scripts content",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:slow": "NEOMINITEL_SLOW=1 vitest run"
+    "test:slow": "cross-env NEOMINITEL_SLOW=1 vitest run"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -23,6 +23,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.3",
+    "cross-env": "^7.0.3",
     "eslint": "^9.15.0",
     "fast-check": "^3.22.0",
     "tsx": "^4.19.2",
