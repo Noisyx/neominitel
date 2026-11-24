@@ -36,6 +36,47 @@ import {
   decodeBytes,
   type RxByte,
 } from '../../src/videotex/decoder';
+import {
+  bitmapToG1Grid,
+  g1GridToBitmap,
+} from '../../src/videotex/mosaic';
+import {
+  buildPageScreen,
+  encodePage,
+  type MosaicSource,
+  type PageRowSource,
+  type PageSource,
+  type Segment,
+  type SegmentSize,
+} from '../../src/videotex/encoder';
+import {
+  ALL_FUNCTION_KEYS,
+  createKeyDecoder,
+  decodeKey,
+  encodeKey,
+  type FunctionKey,
+} from '../../src/videotex/keys';
+import {
+  ERROR_HATCH_GLYPH,
+  getAccentedGlyph,
+  getAsciiGlyph,
+  getSupportedGlyphCount,
+  GLYPH_HEIGHT,
+  GLYPH_WIDTH,
+} from '../../src/videotex/font';
+import {
+  CELL_HEIGHT_PX,
+  CELL_WIDTH_PX,
+  getMosaicBlockRects,
+  isFlashVisible,
+  renderScreenToRgba,
+  resolveCellRender,
+  resolvePalette,
+  SCREEN_HEIGHT_PX,
+  SCREEN_WIDTH_PX,
+} from '../../src/videotex/render';
+import { changedRowIndices } from '../helpers/screen-diff';
+import { isSlowTestsEnabled } from '../helpers/arbitraries';
 
 function assertUniqueTableValues(
   table: Record<string, number>,
@@ -251,10 +292,430 @@ describe('Videotex Task 3: Golden decoder tests', () => {
   });
 });
 
+describe('Videotex Task 4: Encoder and mosaics', () => {
+  it('validates row limits, row lengths (including transliteration expansion) and mosaic bitmaps', () => {
+    const tooManyRows: PageSource = {
+      id: 'test/too-many',
+      rows: Array.from({ length: 25 }, (_, i) => ({
+        row: i + 1,
+        segments: [{ text: 'X' }],
+      })),
+    };
+    expect(encodePage(tooManyRows)).toEqual({
+      ok: false,
+      error: { kind: 'too-many-rows' },
+    });
+
+    const rowTooLong: PageSource = {
+      id: 'test/long-row',
+      rows: [{ row: 4, col: 35, segments: [{ text: '1234567' }] }],
+    };
+    expect(encodePage(rowTooLong)).toEqual({
+      ok: false,
+      error: { kind: 'row-too-long', row: 4, length: 41 },
+    });
+
+    // 'œ' transliterates to 'oe' (2 cells), pushing 40 chars to 41 cells
+    const translitOverflow: PageSource = {
+      id: 'test/translit-overflow',
+      rows: [{ row: 7, segments: [{ text: 'a'.repeat(39) + 'œ' }] }],
+    };
+    expect(encodePage(translitOverflow)).toEqual({
+      ok: false,
+      error: { kind: 'row-too-long', row: 7, length: 41 },
+    });
+
+    const statusTooLong: PageSource = {
+      id: 'test/status-long',
+      status: 'S'.repeat(41),
+      rows: [],
+    };
+    expect(encodePage(statusTooLong)).toEqual({
+      ok: false,
+      error: { kind: 'row-too-long', row: 0, length: 41 },
+    });
+
+    expect(bitmapToG1Grid(['##', '##'])).toEqual({
+      ok: false,
+      error: { kind: 'bad-bitmap', reason: 'Bitmap height 2 must be a multiple of 3' },
+    });
+    expect(bitmapToG1Grid(['###', '###', '###'])).toEqual({
+      ok: false,
+      error: { kind: 'bad-bitmap', reason: 'Bitmap width 3 must be a multiple of 2' },
+    });
+    expect(bitmapToG1Grid(['#?', '..', '..'])).toEqual({
+      ok: false,
+      error: {
+        kind: 'bad-bitmap',
+        reason: "Invalid character '?' at bitmap (0, 1); expected '#' or '.'",
+      },
+    });
+  });
+
+  it('transliterates unsupported non-ASCII characters deterministically with warnings and compresses runs >= 4 with REP', () => {
+    const page: PageSource = {
+      id: 'test/translit-rep',
+      status: '3615 «Néo»',
+      rows: [
+        {
+          row: 2,
+          segments: [
+            { text: 'Cœur d’été ======', fg: COLOURS.CYAN },
+          ],
+        },
+      ],
+    };
+
+    const encodedWithRep = encodePage(page, { useRep: true });
+    const encodedNoRep = encodePage(page, { useRep: false });
+    expect(encodedWithRep.ok).toBe(true);
+    expect(encodedNoRep.ok).toBe(true);
+    if (!encodedWithRep.ok || !encodedNoRep.ok) return;
+
+    // '«', '»', 'œ', '’' each produce a warning; 'é' is supported in G2 without warning
+    expect(encodedWithRep.value.warnings.length).toBe(4);
+    expect(encodedWithRep.value.bytes.includes(C0.REP)).toBe(true);
+    expect(encodedWithRep.value.bytes.length).toBeLessThan(encodedNoRep.value.bytes.length);
+
+    const screen = decodeBytes(encodedWithRep.value.bytes);
+    expect(rowToText(screen, 0).trimEnd()).toBe('3615 "Néo"');
+    expect(rowToText(screen, 2).trimEnd()).toBe("Coeur d'été ======");
+  });
+
+  it('defers non-delimited background changes with a warning and encodes mosaic bitmaps', () => {
+    const bitmap = [
+      '#.#.',
+      '.#.#',
+      '####',
+    ];
+    const grid = bitmapToG1Grid(bitmap);
+    expect(grid.ok).toBe(true);
+    if (grid.ok) {
+      expect(g1GridToBitmap(grid.value)).toEqual(bitmap);
+    }
+
+    const page: PageSource = {
+      id: 'test/bg-delimiter',
+      rows: [
+        {
+          row: 1,
+          segments: [
+            { text: 'SANS_ESPACE puis AVEC', fg: COLOURS.WHITE, bg: COLOURS.BLUE },
+          ],
+        },
+      ],
+      mosaics: [
+        { row: 3, col: 2, bitmap, fg: COLOURS.YELLOW, bg: COLOURS.RED },
+      ],
+    };
+
+    const res = encodePage(page);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    // First 11 chars ('SANS_ESPACE') had no space delimiter so bg stayed 0; at index 11 (' ') bg became BLUE (4)
+    expect(res.value.warnings.length).toBe(11);
+    const decoded = decodeBytes(res.value.bytes);
+    expect(decoded.rows[1][0].bg).toBe(COLOURS.BLACK);
+    expect(decoded.rows[1][10].bg).toBe(COLOURS.BLACK);
+    expect(decoded.rows[1][11].bg).toBe(COLOURS.BLUE);
+    expect(decoded.rows[1][12].bg).toBe(COLOURS.BLUE);
+    expect(decoded.rows[3][1].set).toBe('G1');
+    expect(decoded.rows[3][1].fg).toBe(COLOURS.YELLOW);
+    expect(decoded.rows[3][1].bg).toBe(COLOURS.RED);
+  });
+});
+
+describe('Videotex Task 7: Rendering model and 8x10 bitmap font', () => {
+  it('provides 8x10 glyphs for all ASCII printables and the 12 French G2 accents', () => {
+    expect(CELL_WIDTH_PX).toBe(8);
+    expect(CELL_HEIGHT_PX).toBe(10);
+    expect(SCREEN_WIDTH_PX).toBe(320);
+    expect(SCREEN_HEIGHT_PX).toBe(250);
+    expect(GLYPH_WIDTH).toBe(8);
+    expect(GLYPH_HEIGHT).toBe(10);
+
+    const counts = getSupportedGlyphCount();
+    expect(counts.ascii).toBe(96); // 0x20..0x7F
+    expect(counts.accented).toBe(12);
+
+    // Space is blank; non-space ASCII glyphs have lit pixels
+    expect(Array.from(getAsciiGlyph(0x20)).every((b) => b === 0)).toBe(true);
+    for (let code = 0x21; code <= 0x7f; code++) {
+      const g = getAsciiGlyph(code);
+      expect(g.length).toBe(10);
+      expect(Array.from(g).some((b) => b !== 0)).toBe(true);
+    }
+
+    // Accented glyphs differ from their unaccented base letter
+    for (const rule of SUPPORTED_ACCENTS) {
+      const accented = getAccentedGlyph(rule.diacritic, rule.baseCode);
+      const base = getAsciiGlyph(rule.baseCode);
+      expect(accented.length).toBe(10);
+      expect(Array.from(accented)).not.toEqual(Array.from(base));
+    }
+  });
+
+  it('orders monochrome palette by Minitel 1 luminance, resolves mosaic geometry, inverse (G0 only), flash, and RGBA blitting', () => {
+    const colourPalette = resolvePalette('couleur');
+    const monoPalette = resolvePalette('nb');
+    expect(colourPalette.length).toBe(8);
+    expect(monoPalette.length).toBe(8);
+
+    // Monochrome grey levels strictly increase along MONOCHROME_LUMINANCE_ORDER (0, 4, 1, 5, 2, 6, 3, 7)
+    for (let i = 0; i < MONOCHROME_LUMINANCE_ORDER.length - 1; i++) {
+      const cLo = MONOCHROME_LUMINANCE_ORDER[i];
+      const cHi = MONOCHROME_LUMINANCE_ORDER[i + 1];
+      expect(monoPalette[cLo][0]).toBe(monoPalette[cLo][1]);
+      expect(monoPalette[cLo][1]).toBe(monoPalette[cLo][2]);
+      expect(monoPalette[cLo][0]).toBeLessThan(monoPalette[cHi][0]);
+    }
+
+    // Contiguous mosaic geometry: columns 4+4, rows 3+4+3; disjoint subtracts 1 px right & bottom
+    const contig = getMosaicBlockRects(0x7f, false);
+    expect(contig.map((b) => [b.x, b.y, b.width, b.height])).toEqual([
+      [0, 0, 4, 3],
+      [4, 0, 4, 3],
+      [0, 3, 4, 4],
+      [4, 3, 4, 4],
+      [0, 7, 4, 3],
+      [4, 7, 4, 3],
+    ]);
+    const disjoint = getMosaicBlockRects(0x7f, true);
+    expect(disjoint.map((b) => [b.x, b.y, b.width, b.height])).toEqual([
+      [0, 0, 3, 2],
+      [4, 0, 3, 2],
+      [0, 3, 3, 3],
+      [4, 3, 3, 3],
+      [0, 7, 3, 2],
+      [4, 7, 3, 2],
+    ]);
+
+    // Inverse swaps fg and bg in G0, NOT in G1
+    const g0Inv = resolveCellRender(
+      createBlankCell({ code: 0x41, set: 'G0', fg: COLOURS.YELLOW, bg: COLOURS.BLUE, inverse: true }),
+    );
+    expect(g0Inv.fgRgb).toEqual(colourPalette[COLOURS.BLUE]);
+    expect(g0Inv.bgRgb).toEqual(colourPalette[COLOURS.YELLOW]);
+
+    const g1Inv = resolveCellRender(
+      createBlankCell({ code: 0x7f, set: 'G1', fg: COLOURS.YELLOW, bg: COLOURS.BLUE, inverse: true }),
+    );
+    expect(g1Inv.fgRgb).toEqual(colourPalette[COLOURS.YELLOW]);
+    expect(g1Inv.bgRgb).toEqual(colourPalette[COLOURS.BLUE]);
+
+    // Flash: visible for 2/3 of 1 s ([0, 667)), hidden for 1/3 ([667, 1000)), always visible on reducedMotion
+    expect(isFlashVisible(100, false)).toBe(true);
+    expect(isFlashVisible(800, false)).toBe(false);
+    expect(isFlashVisible(800, true)).toBe(true);
+
+    const hiddenFlash = resolveCellRender(
+      createBlankCell({ code: 0x41, flash: true }),
+      { flashVisible: false },
+    );
+    expect(Array.from(hiddenFlash.bitmap).every((b) => b === 0)).toBe(true);
+
+    // Error cell uses hatched glyph
+    const errRender = resolveCellRender(createBlankCell({ error: true }));
+    expect(errRender.kind).toBe('error');
+    expect(Array.from(errRender.bitmap)).toEqual(Array.from(ERROR_HATCH_GLYPH));
+
+    // Full screen RGBA render produces 320 * 250 * 4 bytes
+    const screen = createBlankScreen();
+    screen.rows[1][0] = createBlankCell({ code: 0x7f, set: 'G1', fg: COLOURS.RED, bg: COLOURS.BLACK });
+    const rgba = renderScreenToRgba(screen);
+    expect(rgba.length).toBe(320 * 250 * 4);
+    // Row 1, col 0 top-left pixel (x=0, y=10) should be RED
+    const offset = (10 * 320 + 0) * 4;
+    expect([rgba[offset], rgba[offset + 1], rgba[offset + 2], rgba[offset + 3]]).toEqual([
+      ...colourPalette[COLOURS.RED],
+      255,
+    ]);
+  });
+});
+
 describe('Videotex Property Tests', () => {
+  const runs = (fast: number, slow: number): number => (isSlowTestsEnabled() ? slow : fast);
+
   const arbRxByte: fc.Arbitrary<RxByte> = fc.record({
     value: fc.integer({ min: 0, max: 127 }),
     error: fc.boolean(),
+  });
+
+  const SUPPORTED_TEXT_CHARS: readonly string[] = [
+    ...'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,;:!?+-*/=()[]"\'',
+    ...SUPPORTED_ACCENTS.map((a) => a.char),
+  ];
+
+  const arbSupportedNonSpaceChar = fc.constantFrom(
+    ...SUPPORTED_TEXT_CHARS.filter((c) => c !== ' '),
+  );
+  const arbSupportedChar = fc.constantFrom(...SUPPORTED_TEXT_CHARS);
+  const arbColour = fc.integer({ min: 0, max: 7 });
+  const arbSize: fc.Arbitrary<SegmentSize> = fc.constantFrom(
+    'normal',
+    'doubleHeight',
+    'doubleWidth',
+    'double',
+  );
+
+  /**
+   * Generates a valid PageSource where every background colour change in G0 begins on a space
+   * delimiter (Requirement 4.4) and row/mosaic coordinates fit within the 24x40 page area.
+   */
+  const arbValidPageSource: fc.Arbitrary<PageSource> = fc
+    .record({
+      hasStatus: fc.boolean(),
+      statusChars: fc.array(arbSupportedChar, { minLength: 0, maxLength: 40 }),
+      rowNumbers: fc.uniqueArray(fc.integer({ min: 1, max: 24 }), {
+        minLength: 0,
+        maxLength: 10,
+      }),
+      hasMosaic: fc.boolean(),
+      mosaicRow: fc.integer({ min: 1, max: 21 }),
+      mosaicCol: fc.integer({ min: 1, max: 35 }),
+      mosaicCellRows: fc.integer({ min: 1, max: 3 }),
+      mosaicCellCols: fc.integer({ min: 1, max: 5 }),
+      mosaicFg: arbColour,
+      mosaicBg: arbColour,
+      mosaicBits: fc.array(fc.constantFrom('#', '.'), { minLength: 90, maxLength: 90 }),
+    })
+    .chain((base) => {
+      const arbRowEntry = (rowNum: number): fc.Arbitrary<PageRowSource> =>
+        fc
+          .tuple(
+            fc.integer({ min: 1, max: 10 }),
+            fc.array(
+              fc.record({
+                len: fc.integer({ min: 1, max: 10 }),
+                chars: fc.array(arbSupportedNonSpaceChar, { minLength: 10, maxLength: 10 }),
+                fg: arbColour,
+                bg: arbColour,
+                flash: fc.boolean(),
+                inverse: fc.boolean(),
+                size: arbSize,
+              }),
+              { minLength: 1, maxLength: 3 },
+            ),
+          )
+          .map(([col, rawSegs]) => {
+            let remaining = SCREEN_COLS - (col - 1);
+            let activeBg: number = COLOURS.BLACK;
+            const segments: Segment[] = [];
+            for (const s of rawSegs) {
+              if (remaining <= 0) break;
+              const take = Math.min(s.len, remaining);
+              let text = s.chars.slice(0, take).join('');
+              // Ensure background transition starts with a space delimiter (Req 4.4)
+              if (s.bg !== activeBg) {
+                text = ' ' + text.slice(1);
+                activeBg = s.bg;
+              }
+              segments.push({
+                text,
+                fg: s.fg,
+                bg: s.bg,
+                flash: s.flash,
+                inverse: s.inverse,
+                size: s.size,
+              });
+              remaining -= text.length;
+            }
+            return { row: rowNum, col, segments };
+          });
+
+      const rowsArb =
+        base.rowNumbers.length === 0
+          ? fc.constant<PageRowSource[]>([])
+          : fc.tuple(...base.rowNumbers.map(arbRowEntry));
+
+      return rowsArb.map((rows) => {
+        const occupiedRows = new Set(rows.map((r) => r.row));
+        const mosaics: MosaicSource[] = [];
+        if (base.hasMosaic) {
+          const hCells = base.mosaicCellRows;
+          const overlapsText = Array.from({ length: hCells }, (_, dr) => base.mosaicRow + dr).some(
+            (r) => occupiedRows.has(r),
+          );
+          if (!overlapsText) {
+            const h = hCells * 3;
+            const w = base.mosaicCellCols * 2;
+            const bitmap: string[] = [];
+            let idx = 0;
+            for (let r = 0; r < h; r++) {
+              let line = '';
+              for (let c = 0; c < w; c++) {
+                line += base.mosaicBits[idx % base.mosaicBits.length];
+                idx++;
+              }
+              bitmap.push(line);
+            }
+            mosaics.push({
+              row: base.mosaicRow,
+              col: base.mosaicCol,
+              bitmap,
+              fg: base.mosaicFg,
+              bg: base.mosaicBg,
+            });
+          }
+        }
+
+        const page: PageSource = {
+          id: 'prop/page',
+          rows,
+          ...(base.hasStatus ? { status: base.statusChars.join('') } : {}),
+          ...(mosaics.length > 0 ? { mosaics } : {}),
+        };
+        return page;
+      });
+    });
+
+  it('V1 round-trip: for any valid PageSource, decoding encodePage(p) gives the expected screen cell by cell', () => {
+    fc.assert(
+      fc.property(arbValidPageSource, (page) => {
+        const expectedRes = buildPageScreen(page);
+        expect(expectedRes.ok).toBe(true);
+        if (!expectedRes.ok) return;
+        expect(expectedRes.value.warnings).toEqual([]);
+
+        const encodedRes = encodePage(page);
+        expect(encodedRes.ok).toBe(true);
+        if (!encodedRes.ok) return;
+
+        const decoded = decodeBytes(encodedRes.value.bytes);
+        expect(screensEqual(decoded, expectedRes.value.screen)).toBe(true);
+
+        // Also check row text and mosaic blocks directly against the source PageSource
+        if (page.status !== undefined) {
+          expect(rowToText(decoded, 0).slice(0, page.status.length)).toBe(page.status);
+        }
+        for (const rSpec of page.rows) {
+          const joined = rSpec.segments.map((s) => s.text).join('');
+          const start = (rSpec.col ?? 1) - 1;
+          expect(rowToText(decoded, rSpec.row).slice(start, start + joined.length)).toBe(
+            joined,
+          );
+        }
+        for (const m of page.mosaics ?? []) {
+          const cellRows = m.bitmap.length / 3;
+          const cellCols = m.bitmap[0].length / 2;
+          const extractedGrid: number[][] = [];
+          for (let dr = 0; dr < cellRows; dr++) {
+            const rowCodes: number[] = [];
+            for (let dc = 0; dc < cellCols; dc++) {
+              const cell = decoded.rows[m.row + dr][m.col - 1 + dc];
+              expect(cell.set).toBe('G1');
+              expect(cell.fg).toBe(m.fg);
+              expect(cell.bg).toBe(m.bg);
+              rowCodes.push(cell.code);
+            }
+            extractedGrid.push(rowCodes);
+          }
+          expect(g1GridToBitmap(extractedGrid)).toEqual(m.bitmap);
+        }
+      }),
+      { numRuns: runs(80, 400) },
+    );
   });
 
   it('V2 byte-by-byte decoding and one-shot decoding give the same screen', () => {
@@ -272,7 +733,126 @@ describe('Videotex Property Tests', () => {
           screensEqual(oneShotScreen, streamScreen, { includeCursorAndAttrs: true }),
         ).toBe(true);
       }),
-      { numRuns: 100 },
+      { numRuns: runs(100, 400) },
+    );
+  });
+
+  it('V3 locality: replacing any single byte except the first (FF) with an error-flagged byte changes cells only in rows r-1, r and r+1', () => {
+    function rowForByteOffsets(bytes: Uint8Array): number[] {
+      const rowOfByte = new Array<number>(bytes.length).fill(1);
+      let currentRow = 1;
+      let i = 0;
+      while (i < bytes.length) {
+        if (bytes[i] === C0.US && i + 2 < bytes.length) {
+          const r = bytes[i + 1] - 0x40;
+          if (r >= 0 && r < SCREEN_ROWS) {
+            currentRow = r;
+          }
+          rowOfByte[i] = currentRow;
+          rowOfByte[i + 1] = currentRow;
+          rowOfByte[i + 2] = currentRow;
+          i += 3;
+          continue;
+        }
+        rowOfByte[i] = currentRow;
+        i++;
+      }
+      return rowOfByte;
+    }
+
+    function allowedNeighbourRows(r: number): Set<number> {
+      if (r === 0) {
+        // Status row 0 is emitted after row 24 and wraps to row 1
+        return new Set([24, 0, 1]);
+      }
+      if (r === 24) {
+        // Page mode wraps row 24 column 40 to row 1 column 1 (Requirement 2.3)
+        return new Set([23, 24, 1]);
+      }
+      return new Set([r - 1, r, r + 1]);
+    }
+
+    fc.assert(
+      fc.property(
+        arbValidPageSource,
+        fc.array(fc.integer({ min: 1, max: 10000 }), { minLength: 8, maxLength: 8 }),
+        (page, rawPicks) => {
+          const encoded = encodePage(page);
+          expect(encoded.ok).toBe(true);
+          if (!encoded.ok) return;
+
+          const { bytes } = encoded.value;
+          if (bytes.length <= 1) return;
+
+          const cleanScreen = decodeBytes(bytes);
+          const byteRows = rowForByteOffsets(bytes);
+
+          // Always test every US introducer + sampled interior bytes
+          const indicesToTest = new Set<number>();
+          for (let i = 1; i < bytes.length; i++) {
+            if (bytes[i] === C0.US) {
+              indicesToTest.add(i);
+            }
+          }
+          for (const pick of rawPicks) {
+            indicesToTest.add(1 + (pick % (bytes.length - 1)));
+          }
+
+          for (const errIndex of indicesToTest) {
+            const rxStream: RxByte[] = Array.from(bytes, (value, idx) => ({
+              value,
+              error: idx === errIndex,
+            }));
+            const damagedScreen = decodeBytes(rxStream);
+            const r = byteRows[errIndex];
+            const allowed = allowedNeighbourRows(r);
+            const diffRows = changedRowIndices(damagedScreen, cleanScreen);
+            for (const changedRow of diffRows) {
+              expect(allowed.has(changedRow)).toBe(true);
+            }
+          }
+        },
+      ),
+      { numRuns: runs(50, 250) },
+    );
+  });
+
+  it('V4 REP: encoding with and without REP gives the same screen', () => {
+    const arbRepHeavyPage: fc.Arbitrary<PageSource> = fc
+      .tuple(
+        arbValidPageSource,
+        fc.constantFrom(...SUPPORTED_TEXT_CHARS),
+        fc.integer({ min: 4, max: 35 }),
+        arbColour,
+      )
+      .map(([base, ch, count, fg]) => ({
+        ...base,
+        rows: [
+          ...base.rows.filter((r) => r.row !== 12),
+          {
+            row: 12,
+            col: 1,
+            segments: [{ text: ch.repeat(count), fg }],
+          },
+        ],
+      }));
+
+    fc.assert(
+      fc.property(arbRepHeavyPage, (page) => {
+        const withRep = encodePage(page, { useRep: true });
+        const withoutRep = encodePage(page, { useRep: false });
+        expect(withRep.ok).toBe(true);
+        expect(withoutRep.ok).toBe(true);
+        if (!withRep.ok || !withoutRep.ok) return;
+
+        const screenRep = decodeBytes(withRep.value.bytes);
+        const screenNoRep = decodeBytes(withoutRep.value.bytes);
+        expect(screensEqual(screenRep, screenNoRep)).toBe(true);
+        expect(withRep.value.bytes.length).toBeLessThanOrEqual(
+          withoutRep.value.bytes.length,
+        );
+      }),
+      { numRuns: runs(80, 300) },
     );
   });
 
@@ -321,7 +901,55 @@ describe('Videotex Property Tests', () => {
         const stats = decoder.stats();
         expect(stats.bytes).toBe(rxBytes.length);
       }),
-      { numRuns: 100 },
+      { numRuns: runs(100, 400) },
     );
+  });
+
+  it('V7 encoder output contains only bytes <= 127 and starts with FF', () => {
+    fc.assert(
+      fc.property(arbValidPageSource, (page) => {
+        const res = encodePage(page);
+        expect(res.ok).toBe(true);
+        if (!res.ok) return;
+
+        const { bytes } = res.value;
+        expect(bytes.length).toBeGreaterThan(0);
+        expect(bytes[0]).toBe(C0.FF);
+        for (let i = 0; i < bytes.length; i++) {
+          expect(bytes[i]).toBeGreaterThanOrEqual(0);
+          expect(bytes[i]).toBeLessThanOrEqual(127);
+        }
+      }),
+      { numRuns: runs(100, 400) },
+    );
+  });
+
+  it('V11 decodeKey(encodeKey(k)) = k for the nine function keys', () => {
+    expect(ALL_FUNCTION_KEYS.length).toBe(9);
+    const arbKey: fc.Arbitrary<FunctionKey> = fc.constantFrom(...ALL_FUNCTION_KEYS);
+
+    fc.assert(
+      fc.property(arbKey, (key) => {
+        const encoded = encodeKey(key);
+        expect(encoded.length).toBe(2);
+        expect(encoded[0]).toBe(C0.SEP);
+        expect(decodeKey(encoded)).toBe(key);
+
+        const stream = createKeyDecoder();
+        expect(stream.push({ value: encoded[0], error: false })).toBeNull();
+        expect(stream.push({ value: encoded[1], error: false })).toBe(key);
+      }),
+      { numRuns: 50 },
+    );
+
+    // Invalid sequences return null
+    expect(decodeKey(Uint8Array.of(0x41))).toBeNull();
+    expect(decodeKey(Uint8Array.of(0x00, 0x41))).toBeNull();
+    expect(decodeKey(Uint8Array.of(C0.SEP, 0x50))).toBeNull();
+
+    // Error-flagged key byte aborts sequence
+    const stream = createKeyDecoder();
+    expect(stream.push({ value: C0.SEP, error: false })).toBeNull();
+    expect(stream.push({ value: 0x41, error: true })).toBeNull();
   });
 });
