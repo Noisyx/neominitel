@@ -20,14 +20,14 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - [x] 3.5 Golden tests; property tests V2, V6.
   - _Requirements: 2.1-2.6, 3.1-3.2, 9.2_
 
-- [ ] 4. Encoder `[MVP]`
-  - [ ] 4.1 Robust row encoding (US on every row, explicit attributes, background before delimiters).
-  - [ ] 4.2 REP compression, accents, transliteration with warnings, typed errors.
-  - [ ] 4.3 Mosaic bitmaps to G1.
-  - [ ] 4.4 Property tests V1, V3, V4, V5, V7.
+- [x] 4. Encoder `[MVP]`
+  - [x] 4.1 Robust row encoding (US on every row, explicit attributes, background before delimiters).
+  - [x] 4.2 REP compression, accents, transliteration with warnings, typed errors.
+  - [x] 4.3 Mosaic bitmaps to G1.
+  - [x] 4.4 Property tests V1, V3, V4, V5, V7.
   - _Requirements: 4.1-4.6, 5.1-5.3, 6.1-6.2_
 
-- [ ] 5. Keyboard codes `[MVP]`
+- [x] 5. Keyboard codes `[MVP]`
   - `encodeKey` / `decodeKey`; property test V11.
   - _Requirements: 7.1-7.2_
 
@@ -37,9 +37,9 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - [ ] 6.3 Property tests V8, V9, V10.
   - _Requirements: 8.1-8.4, 9.1_
 
-- [ ] 7. Rendering model `[MVP]`
-  - [ ] 7.1 8 × 10 bitmap font for the supported characters (drawn for the project or open licence, recorded in `docs/licenses.md`).
-  - [ ] 7.2 Colour and black-and-white palettes, mosaic block geometry, inverse and flash.
+- [x] 7. Rendering model `[MVP]`
+  - [x] 7.1 8 × 10 bitmap font for the supported characters (drawn for the project or open licence, recorded in `docs/licenses.md`).
+  - [x] 7.2 Colour and black-and-white palettes, mosaic block geometry, inverse and flash.
   - _Requirements: 10.1-10.3_
 
 - [ ] 8. Double height and width `[STRETCH]`

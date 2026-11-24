@@ -36,6 +36,7 @@ export interface DecoderStats {
 export interface VideotexDecoder {
   push(b: RxByte): { changed: [row: number, col: number][] };
   pushMany(bytes: Iterable<RxByte | number>): { changed: [row: number, col: number][] };
+  cellAt(row: number, col: number): Cell;
   screen(): Screen;
   stats(): DecoderStats;
   reset(): void;
@@ -519,6 +520,12 @@ export function createVideotexDecoder(): VideotexDecoder {
   return {
     push,
     pushMany,
+    cellAt(row: number, col: number): Cell {
+      if (row < 0 || row >= SCREEN_ROWS || col < 0 || col >= SCREEN_COLS) {
+        return createBlankCell();
+      }
+      return cloneCell(currentScreen.rows[row][col]);
+    },
     screen(): Screen {
       return cloneScreen(currentScreen);
     },
