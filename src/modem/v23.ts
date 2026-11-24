@@ -40,3 +40,6 @@ export const FRAME = {
 
 export const SAMPLE_RATE_MIN_HZ = 8000;
 export const SAMPLE_RATE_MAX_HZ = 96000;
+
+/** Answer tone of the connection sequence (requirement 3.1). */
+export const ANSWER_TONE_HZ = 2100;
