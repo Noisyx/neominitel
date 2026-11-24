@@ -1,0 +1,18 @@
+export const THEME_TOKENS = {
+  backdrop: '#121210',
+  surface: '#1b1a17',
+  surfaceRaised: '#24221e',
+  borderSubtle: 'rgba(235, 228, 214, 0.10)',
+  caseLight: '#d8ceb8',
+  caseMid: '#c4b79e',
+  caseShadow: '#9d9078',
+  bezelDark: '#231f1c',
+  bezelInner: '#141210',
+  crtGlass: '#080908',
+  keycapBrown: '#4a3b31',
+  keycapTerracotta: '#b65332',
+  textPrimary: '#ede7da',
+  textSecondary: '#b5ac9b',
+  textMuted: '#7f786a',
+  focusRing: '#e5b84b',
+} as const;

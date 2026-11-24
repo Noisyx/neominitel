@@ -2,21 +2,21 @@
 
 Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Depends on `v23-modem` tasks 1-9 and `videotex` tasks 1-4.
 
-- [ ] 1. App shell `[MVP]`
-  - [ ] 1.1 React app, theme tokens, `MinitelShell` (original SVG), `ScreenCanvas` drawing a static screen model.
-  - [ ] 1.2 Start screen with the "30 juin 2012" line and the *Connexion* button.
+- [x] 1. App shell `[MVP]`
+  - [x] 1.1 React app, theme tokens, `MinitelShell` (original SVG), `ScreenCanvas` drawing a static screen model.
+  - [x] 1.2 Start screen with the "30 juin 2012" line and the *Connexion* button.
   - _Requirements: 1.1, 4.1, 9.1_
 
-- [ ] 2. Line worker `[MVP]`
-  - [ ] 2.1 Worker with the protocol from the design; `transmit` with block streaming (100 ms, 3 blocks ahead).
-  - [ ] 2.2 Simulator in the block loop; `setSim`, `setThreshold`.
-  - [ ] 2.3 Videotex decoding in the worker; `diff`, `pageStart`, `pageEnd` events; spectrum in `diag`.
+- [x] 2. Line worker `[MVP]`
+  - [x] 2.1 Worker with the protocol from the design; `transmit` with block streaming (100 ms, 3 blocks ahead).
+  - [x] 2.2 Simulator in the block loop; `setSim`, `setThreshold`.
+  - [x] 2.3 Videotex decoding in the worker; `diff`, `pageStart`, `pageEnd` events; spectrum in `diag`.
   - _Requirements: 2.1, 3.2, 13.1_
 
-- [ ] 3. Playback and scheduler `[MVP]`
-  - [ ] 3.1 Gapless block playback, mute, sample clock.
-  - [ ] 3.2 Scheduler applying timed events in `requestAnimationFrame`; property test A5.
-  - [ ] 3.3 Connection sequence on *Connexion*, then SOMMAIRE in `Seul` mode.
+- [x] 3. Playback and scheduler `[MVP]`
+  - [x] 3.1 Gapless block playback, mute, sample clock.
+  - [x] 3.2 Scheduler applying timed events in `requestAnimationFrame`; property test A5.
+  - [x] 3.3 Connection sequence on *Connexion*, then SOMMAIRE in `Seul` mode.
   - _Requirements: 1.2-1.5_
 
 - [ ] 4. Router, services and content `[MVP]`
