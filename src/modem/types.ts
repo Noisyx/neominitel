@@ -78,49 +78,6 @@ export type ModemError =
   | { kind: 'bad-option'; option: string; reason: string }
   | { kind: 'wav'; reason: string };
 
-export interface HumParams {
-  levelDb: number;
-  fundamentalHz?: number; // default 50
-  harmonics?: number; // default 5
-}
-
-export interface BurstParams {
-  ratePerS: number;
-  durationMs: [number, number];
-  levelDb: number;
-}
-
-export interface ChannelParams {
-  sampleRate: number;
-  seed: number; // uint32
-  channel?: ChannelId; // default 'forward'
-  signalAmplitude?: number; // default 0.5
-  noise?: { kind: 'ebN0'; db: number } | { kind: 'snr3k'; db: number };
-  offsetHz?: number;
-  clockPpm?: number;
-  hum?: HumParams;
-  bursts?: BurstParams;
-}
-
-export interface LineChannel {
-  process(chunk: Float32Array): Float32Array;
-  flush(): Float32Array;
-  setParams(p: Partial<Omit<ChannelParams, 'sampleRate' | 'seed'>>): void;
-  reset(): void;
-}
-
-export interface BerSnapshot {
-  bits: number;
-  errors: number;
-  ber: number;
-  lo: number;
-  hi: number;
-  synced: boolean;
-  resyncs: number;
-}
-
-export interface TheoryCurvePoint {
-  ebN0Db: number;
-  orthogonalBer: number;
-  correlatedBer: number;
-}
+// The line simulator types (ChannelParams, LineChannel, HumParams, BurstParams) and the PN9/BER
+// types (BerSnapshot, BerCounter) are defined with their implementations in channel.ts (task 9)
+// and prbs.ts (task 10), as specified in design.md. They are not declared here before they exist.

@@ -1,11 +1,13 @@
+import { CHANNELS } from '../../src/modem';
 import { createRng } from './rng';
 
 export type AwgnOptions =
   | {
       sampleRate: number;
       ebN0Db: number;
-      baud?: number; // default 1200 (forward channel line bit rate)
-      signalPower?: number; // optional override; if omitted, measured mean square of signal
+      baud?: number; // default CHANNELS.forward.baud (forward channel line bit rate)
+      signalPower?: number; // optional override; if omitted, see signalAmplitude, then measured
+      signalAmplitude?: number; // peak amplitude A of the received tone: P = A^2 / 2 (A7 reference)
       seed?: number;
     }
   | {
@@ -13,6 +15,7 @@ export type AwgnOptions =
       snrDb: number;
       bandwidthHz?: number; // reference noise bandwidth (default 3000 Hz for γ_3k, or B_n for γ_band)
       signalPower?: number;
+      signalAmplitude?: number;
       seed?: number;
     };
 
@@ -40,11 +43,17 @@ export function awgn(signal: Float32Array, options: AwgnOptions): Float32Array {
   const { sampleRate } = options;
   const seed = options.seed ?? 12345;
   const rng = createRng(seed);
-  const pSignal = options.signalPower ?? measureSignalPower(signal);
+  // Signal power reference, in order: explicit power, peak amplitude (P = A^2 / 2), measured.
+  // The amplitude reference ignores silences and ramps, as the A7 convention (docs/math.md) requires.
+  const pSignal =
+    options.signalPower ??
+    (options.signalAmplitude !== undefined
+      ? (options.signalAmplitude * options.signalAmplitude) / 2
+      : measureSignalPower(signal));
 
   let n0: number;
   if ('ebN0Db' in options) {
-    const baud = options.baud ?? 1200;
+    const baud = options.baud ?? CHANNELS.forward.baud;
     const ebN0Linear = Math.pow(10, options.ebN0Db / 10);
     n0 = pSignal / (baud * ebN0Linear);
   } else {
