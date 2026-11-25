@@ -287,8 +287,8 @@ filter c1 Hamming); 400,000 bits per condition. Equivalence margin ±10 % relati
 
 | Item | Statement | Status | Checked by |
 |---|---|---|---|
-| M6 target | BER ≤ 10⁻³ at Eb/N0 = 12 dB for each of 20 seeds of 20,000 bits may need a higher Eb/N0. | Hypothesis | Task 12 (decision U6) |
-| M10 | M2M4 estimator within ±1 dB from 0 to 30 dB band SNR; the 30 dB end needs an envelope CV ≲ 2 %. | Hypothesis | E5 / task 10 |
+| M6 target | BER ≤ 10⁻³ at Eb/N0 = 12 dB for each of 20 seeds of 20,000 bits may need a higher Eb/N0. | Measured in task 10, not met: 3.4·10⁻² with `BerCounter` (data-bit BER 2.2·10⁻³ plus 7-bit framing slips); figures in design.md "Quality", M6 gap | Task 12 (decision U6) |
+| M10 | M2M4 estimator within ±1 dB from 0 to 30 dB band SNR; the 30 dB end needs an envelope CV ≲ 2 %. | Refuted for the plain estimator (clean FSK reads 22.8 dB); met with the kurtosis-corrected estimator (k_s = 1.0105) averaged over 1 s, task 10 | Task 10 (design.md "Quality") |
 | M7 | The adaptive mark estimate needs the central-half-bit mean (not the whole bit) to stay within ±20 Hz. | Hypothesis | E4 / task 8 |
 | M4 | A start-bit inversion loses the frame; a stop-bit inversion gives `framingOk = false` and may lose the next frame. | Hypothesis (spec amended) | Characterization tests, J3-3 |
 

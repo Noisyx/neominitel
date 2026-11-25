@@ -56,9 +56,9 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - _Requirements: 11.1-11.3_
 
 - [ ] 10. Quality and BER `[MVP]`
-  - [ ] 10.1 M2M4 SNR estimator, 3 kHz normalization, Eb/N0, parity error rate.
-  - [ ] 10.2 PN9 generator (`pn9Frames`), self-synchronizing `BerCounter`, `wilsonInterval` and its `wilson95` convenience wrapper.
-  - [ ] 10.3 Property tests M10, M11, M6.
+  - [x] 10.1 M2M4 SNR estimator, 3 kHz normalization, Eb/N0, parity error rate.
+  - [x] 10.2 PN9 generator (`pn9Frames`), self-synchronizing `BerCounter`, `wilsonInterval` and its `wilson95` convenience wrapper.
+  - [ ] 10.3 Property tests M10, M11, M6. (M10 and M11 pass. M6 is written as specified and fails at 12 dB: target to settle in task 12, see design.md "Quality", M6 gap.)
   - _Requirements: 9.1-9.4, 10.1-10.3_
 
 - [ ] 11. Theory curves `[MVP]` (mathematician)

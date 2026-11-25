@@ -6,8 +6,9 @@ import { createDetector } from './carrier';
 import { createDiscriminator, type DiscriminatorOutput } from './discriminator';
 import { ADAPTIVE_INIT_MS, createThresholdSource, type ThresholdMode, type ThresholdState } from './threshold';
 import type { DemodEvent, DemodOptions, ModemError, Result, StreamingDemodulator } from './types';
+import { m2m4, parityErrorRate, snrReport } from './quality';
 import { createUart, type UartChar } from './uart';
-import { CARRIER, CHANNELS, FRAME } from './v23';
+import { CARRIER, CHANNELS, FRAME, QUALITY } from './v23';
 
 /** diag is emitted at most this often (requirement 8.4), on absolute time boundaries (T7-6). */
 const DIAG_INTERVAL_S = 0.05;
@@ -39,8 +40,11 @@ interface Sample {
  * `push` runs the discriminator, the carrier and answer-tone detector, and the UART. The UART
  * receives estimates only while the carrier is on and is reset when the carrier drops, so silence
  * (which the discriminator reads as 1800 Hz, space) cannot invent characters. `diag` is emitted at
- * every absolute 50 ms boundary whether or not the carrier is on. No `quality` event is emitted
- * before task 10 (decision T7-5).
+ * every absolute 50 ms boundary whether or not the carrier is on. `quality` (task 10) is emitted at
+ * every absolute 100 ms boundary B while the carrier is on, from the kurtosis-corrected M2M4
+ * moments of the carrier-on estimates of the last second (design.md "Quality"); it is released
+ * once the carrier state up to B + 70 ms is known, and dropped when the carrier goes off in that
+ * span (its moments may contain the silence before the off decision).
  *
  * Event dates, order and latency (M5): every event is dated in input samples since reset
  * (rounded, decision T7-2) on the compensated time base of the discriminator. Time boundaries
@@ -118,6 +122,90 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
   const held: { e: DemodEvent; seq: number }[] = []; // events waiting for release
   let seq = 0;
 
+  // Quality (task 10, design.md "Quality"): moments of z over absolute blocks of intervalMs, summed
+  // over the carrier-on blocks of the last averageMs; an estimate at every block end while the
+  // carrier is on. A boundary B is crossed at the first estimate dated B or later, in time order
+  // with the carrier events, so the result never depends on chunk boundaries.
+  const qualityEvery = Math.max(1, Math.round((QUALITY.intervalMs / 1000) * d.sampleRate));
+  const qualityBlocks = Math.max(1, Math.round(QUALITY.averageMs / QUALITY.intervalMs));
+  const qualityMinEstimates = ((QUALITY.minMs / 1000) * d.sampleRate) / d.decimation;
+  let nextQualityAt = qualityEvery;
+  let block = { s2: 0, s4: 0, c: 0 }; // block ending at nextQualityAt
+  const blockHistory: { s2: number; s4: number; c: number }[] = []; // previous blocks, newest last
+  // Estimates crossed but not yet emitted: the parity rate and the offset need every frame decided
+  // before B, known at the end of the current consume.
+  const pendingQuality: { at: number; s2: number; s4: number; c: number }[] = [];
+  const decided: { t: number; parityOk: boolean }[] = []; // frames by decision time
+
+  function clearQualityMoments(): void {
+    block = { s2: 0, s4: 0, c: 0 };
+    blockHistory.length = 0;
+  }
+
+  /** Crosses the quality boundaries B <= t. */
+  function crossQuality(t: number): void {
+    while (nextQualityAt <= t) {
+      if (carrierOn) {
+        let s2 = block.s2;
+        let s4 = block.s4;
+        let c = block.c;
+        for (const b of blockHistory) {
+          s2 += b.s2;
+          s4 += b.s4;
+          c += b.c;
+        }
+        if (c >= qualityMinEstimates) pendingQuality.push({ at: nextQualityAt, s2, s4, c });
+      }
+      blockHistory.push(block);
+      if (blockHistory.length > qualityBlocks - 1) blockHistory.shift();
+      block = { s2: 0, s4: 0, c: 0 };
+      nextQualityAt += qualityEvery;
+    }
+  }
+
+  // A carrier off is decided up to offHoldMs + 2 windows after the signal drops. An estimate dated
+  // B is kept only once the carrier state up to B + qualityTail is known, and dropped when a
+  // carrier off falls in (B, B + qualityTail]: its moments may contain the silence after the drop.
+  const qualityTail = ((CARRIER.offHoldMs + 2 * CARRIER.windowMs) / 1000) * d.sampleRate;
+  const awaitingQuality: Extract<DemodEvent, { type: 'quality' }>[] = [];
+  const carrierOffs: number[] = []; // dates of detected (not forced) carrier off
+
+  /** Computes the crossed estimates (every frame decided before B is known now). */
+  function emitQuality(): void {
+    for (const q of pendingQuality) {
+      const est = m2m4(q.s2 / q.c, q.s4 / q.c, QUALITY.forwardEnvelopeKurtosis);
+      awaitingQuality.push({
+        type: 'quality',
+        atSample: q.at,
+        ...snrReport(est.snr, d.noiseBandwidthHz, spec.baud),
+        parityErrorRate: parityErrorRate(decided, q.at, QUALITY.parityFrames),
+        offsetHz: stateBefore(q.at).markHz - spec.markHz,
+      });
+    }
+    pendingQuality.length = 0;
+    let before = 0;
+    for (let i = decided.length - 1; i >= 0; i--) if (decided[i].t < nextQualityAt) before++;
+    if (before > QUALITY.parityFrames) decided.splice(0, before - QUALITY.parityFrames);
+  }
+
+  /** Holds or drops the awaiting estimates whose tail is known (all of them when `final`). */
+  function settleQuality(knownUpTo: number, final: boolean): void {
+    while (awaitingQuality.length > 0) {
+      const q = awaitingQuality[0];
+      if (!final && knownUpTo < q.atSample + qualityTail) break;
+      awaitingQuality.shift();
+      if (!carrierOffs.some((t) => t > q.atSample && t <= q.atSample + qualityTail)) hold(q);
+    }
+    const keepFrom = awaitingQuality.length > 0 ? awaitingQuality[0].atSample : nextQualityAt - qualityEvery;
+    while (carrierOffs.length > 0 && carrierOffs[0] <= keepFrom) carrierOffs.shift();
+  }
+
+  /** Held events dated at or after this cannot be released: an estimate dated there is awaited. */
+  function releaseCap(): number {
+    if (pendingQuality.length > 0) return pendingQuality[0].at;
+    return awaitingQuality.length > 0 ? awaitingQuality[0].atSample : Infinity;
+  }
+
   // Adaptive threshold (task 8). After each carrier on, the mean frequency of the estimates dated
   // in [onT, onT + 20 ms) initialises mu_mark (idle carrier is mark), in both modes, so a switch to
   // adaptive can use it. In adaptive mode the UART starts only once that estimate exists; once
@@ -166,8 +254,9 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
   /** Releases, in (atSample, type) order, the held events that nothing earlier can precede. */
   function release(horizon: number): DemodEvent[] {
     held.sort((a, b) => a.e.atSample - b.e.atSample || TYPE_RANK[a.e.type] - TYPE_RANK[b.e.type] || a.seq - b.seq);
+    const cap = releaseCap();
     let n = 0;
-    while (n < held.length && held[n].e.atSample + releaseLag <= horizon) n++;
+    while (n < held.length && held[n].e.atSample + releaseLag <= horizon && held[n].e.atSample < cap) n++;
     return held.splice(0, n).map((h) => h.e);
   }
 
@@ -198,6 +287,7 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
         windows.push([c.atSample + i * bitSamples, c.atSample + (i + 1) * bitSamples]);
       }
       frames.push({ decisionT: c.atSample + decisionOffset, windows });
+      decided.push({ t: c.atSample + decisionOffset, parityOk: c.parityOk });
       // The frame's decision-directed update takes effect at its decision time.
       stateLog.push({ t: c.atSample + decisionOffset, s: c.threshold });
       hold({
@@ -238,7 +328,12 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
     while (i < samples.length && samples[i].t < limit) {
       const s = samples[i];
       i++;
+      crossQuality(s.t);
       if (!carrierOn) continue;
+      const p = s.re * s.re + s.im * s.im;
+      block.s2 += p;
+      block.s4 += p * p;
+      block.c++;
       if (!Number.isNaN(initStart)) {
         if (s.t < initStart + initSamples) {
           initSum += s.f;
@@ -303,7 +398,9 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
     let cursor = 0;
     for (const ev of detected.carrier) {
       cursor = feedUart(samples, cursor, ev.atSample);
+      clearQualityMoments(); // the moments of one transmission only
       if (!ev.on) {
+        carrierOffs.push(ev.atSample);
         uart.reset();
         clearThreshold(ev.atSample); // a new transmission may have another offset
       } else {
@@ -316,6 +413,10 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
     }
     feedUart(samples, cursor, Infinity);
     for (const ev of detected.connect) hold({ type: 'connect', atSample: atIndex(ev.atSample) });
+    if (endOfInput !== undefined) crossQuality(endOfInput);
+    // Before the diags: a diag prunes the threshold states that the offset of an estimate reads.
+    emitQuality();
+    settleQuality(endOfInput ?? lastEstimateT, false);
     crossDiagBoundaries(endOfInput ?? lastEstimateT);
   }
 
@@ -335,6 +436,9 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
       try {
         const end = inputCount;
         consume(d.push(new Float32Array(flushPad)), new Float32Array(0), end, end, end);
+        // The end of the input is not a carrier drop: the remaining estimates are kept, unless a
+        // detected carrier off follows them.
+        settleQuality(end, true);
         const off = detector.forceOff(end);
         if (off) {
           uart.reset();
@@ -356,6 +460,10 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
         clearThreshold(end);
         lastEstimateT = end;
         nextDiagAt = (Math.floor(end / diagEvery) + 1) * diagEvery;
+        clearQualityMoments();
+        decided.length = 0;
+        carrierOffs.length = 0;
+        nextQualityAt = (Math.floor(end / qualityEvery) + 1) * qualityEvery;
         return out;
       } catch {
         return []; // never throws
@@ -376,6 +484,12 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
       frames.length = 0;
       held.length = 0;
       seq = 0;
+      clearQualityMoments();
+      pendingQuality.length = 0;
+      awaitingQuality.length = 0;
+      carrierOffs.length = 0;
+      decided.length = 0;
+      nextQualityAt = qualityEvery;
       threshold.mode = initialMode;
       threshold.clear();
       initStart = NaN;

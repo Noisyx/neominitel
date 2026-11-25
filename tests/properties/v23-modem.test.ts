@@ -47,7 +47,12 @@ import {
   createChannel,
   type ChannelParams,
   type LineChannel,
+  BerCounter,
+  pn9Frames,
+  wilson95,
+  wilsonInterval,
 } from '../../src/modem';
+import { m2m4, snrReport } from '../../src/modem/quality';
 import { CARRIER, DISCRIMINATOR } from '../../src/modem/v23';
 import {
   ComplexDecimatingFir,
@@ -2409,6 +2414,8 @@ function fixedGoldenDigests(): string[] {
   // `connect` events are left out: they come from the answer-tone detector, not from the threshold
   // path, and none of these signals produced one with the task 7 code (the digests were computed
   // on the full lists). The Goertzel normalisation fixed in task 8 adds the connect of signal 3.
+  // `quality` events (task 10) are left out for the same reason: the task 7 code emitted none, so
+  // every event the digests cover is still compared.
   const bytes = Uint8Array.from(ascii('3615 NEOMINITEL'));
   const signals: [number, Float32Array][] = [];
   const m1 = modulate(bytes, { sampleRate: 48000 });
@@ -2427,7 +2434,7 @@ function fixedGoldenDigests(): string[] {
   signals.push([22050, awgn(fskOffset(bytes, 22050, 200), { sampleRate: 22050, snrDb: 20, bandwidthHz: 3000, signalAmplitude: 0.5, seed: 12 })]);
   return signals.map(([fs, x]) =>
     createHash('sha256')
-      .update(eventsJson(demodEvents(x, fs).filter((e) => e.type !== 'connect')))
+      .update(eventsJson(demodEvents(x, fs).filter((e) => e.type !== 'connect' && e.type !== 'quality')))
       .digest('hex'),
   );
 }
@@ -2724,7 +2731,7 @@ describe('v23-modem task 7: streaming demodulator', () => {
   });
 
   it('robustness: arbitrary samples never throw and events are well typed', () => {
-    const types = ['carrier', 'connect', 'char', 'diag'];
+    const types = ['carrier', 'connect', 'char', 'quality', 'diag'];
     fc.assert(
       fc.property(fc.float64Array({ minLength: 0, maxLength: 4000 }), (values) => {
         const x = Float32Array.from(values, (v) => (Number.isFinite(v) ? Math.max(-10, Math.min(10, v)) : v));
@@ -2736,21 +2743,28 @@ describe('v23-modem task 7: streaming demodulator', () => {
           expect(types).toContain(e.type);
           expect(Number.isInteger(e.atSample)).toBe(true);
           expect(e.atSample).toBeGreaterThanOrEqual(0);
+          if (e.type === 'quality') {
+            // Task 10: SNR values are numbers (+-Infinity allowed), rates in [0, 1], offset finite.
+            for (const v of [e.snrBandDb, e.snr3kDb, e.ebN0Db]) expect(Number.isNaN(v)).toBe(false);
+            expect(e.parityErrorRate).toBeGreaterThanOrEqual(0);
+            expect(e.parityErrorRate).toBeLessThanOrEqual(1);
+            expect(Number.isFinite(e.offsetHz)).toBe(true);
+          }
         }
-        expect(events.some((e) => e.type === 'quality')).toBe(false);
       }),
       { numRuns: DEMOD_RUNS },
     );
   });
 
-  it('no quality event before task 10 (decision T7-5); reset returns to the initial state', () => {
+  it('quality events from task 10 (decision T7-5 lifted); reset returns to the initial state', () => {
     const fs = 16000;
     const m = modulate(Uint8Array.from(ascii('Z')), { sampleRate: fs });
     if (!m.ok) throw new Error('modulate');
     const r = createDemodulator({ sampleRate: fs, threshold: 'fixed' });
     if (!r.ok) throw new Error('demod');
     const first = [...r.value.push(m.value), ...r.value.flush()];
-    expect(first.some((e) => e.type === 'quality')).toBe(false);
+    // 'Z' lasts 158 ms: carrier on at 20 ms, so the 100 ms boundary has 80 ms of estimates.
+    expect(first.filter((e) => e.type === 'quality').map((e) => e.atSample)).toEqual([1600]);
     expect(charsOf(first).map((c) => c.value)).toEqual([90]);
     r.value.reset();
     expect([...r.value.push(m.value), ...r.value.flush()]).toEqual(first);
@@ -3327,5 +3341,269 @@ describe('v23-modem task 9: line simulator', () => {
       ),
       { numRuns: CH_RUNS },
     );
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 10: quality and BER (requirements 9 and 10.1-10.3, design.md "Quality", "PN9 and BER")
+
+const BER_RUNS = isSlowTestsEnabled() ? 400 : 60;
+
+/** Two-sided noise bandwidth B_n of the forward low-pass at fs (the demodulator's). */
+function forwardNoiseBandwidth(fs: number): number {
+  return noiseBandwidthHz(designLowpass(fs, FWD.lowpassHz, DISCRIMINATOR.forward.transitionHz), fs);
+}
+
+function qualityOf(events: readonly DemodEvent[]): Extract<DemodEvent, { type: 'quality' }>[] {
+  return events.filter((e): e is Extract<DemodEvent, { type: 'quality' }> => e.type === 'quality');
+}
+
+/** Sequence bits of pn9Frames output, 7 per byte, LSB first. */
+function bitsOfFrames(bytes: Uint8Array): number[] {
+  const out: number[] = [];
+  for (const b of bytes) for (let i = 0; i < 7; i++) out.push((b >> i) & 1);
+  return out;
+}
+
+describe('v23-modem task 10: PN9, BER counter and Wilson interval', () => {
+  it('M11 PN9: period is 511; with k injected bit errors among n bits and no framing errors, the counter reports exactly k errors', () => {
+    // Period: 73 frames of 7 bits = 511 bits, and no shorter period (511 = 7 x 73).
+    const two = bitsOfFrames(pn9Frames(146));
+    expect(two.slice(0, 511)).toEqual(two.slice(511));
+    for (const p of [7, 73]) expect(two.slice(0, 511 - p)).not.toEqual(two.slice(p, 511));
+    expect(two.slice(0, 511).reduce((s, b) => s + b, 0)).toBe(256); // m-sequence: 2^8 ones
+    expect(two.slice(0, 9)).toEqual([1, 1, 1, 1, 1, 1, 1, 1, 1]); // seed 0x1FF
+    // Recurrence of x^9 + x^5 + 1: a[n + 9] = a[n + 5] xor a[n].
+    for (let n = 0; n + 9 < two.length; n++) expect(two[n + 9]).toBe(two[n + 5] ^ two[n]);
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 3, max: 400 }),
+        fc.integer({ min: 0, max: 1000 }),
+        fc.integer({ min: 0, max: 20 }),
+        fc.integer({ min: 0, max: 0xffffffff }),
+        (n, start, k, seed) => {
+          const tx = pn9Frames(n, { startFrame: start });
+          expect(Array.from(tx)).toEqual(Array.from(pn9Frames(start + n).subarray(start)));
+          const rx = tx.slice();
+          // k distinct error positions among the counted bits (after the 9 sync bits). At most
+          // 20 errors, so no window of 100 bits exceeds the resync limit.
+          const rng = createRng(seed);
+          const counted = 7 * n - 9;
+          const kk = Math.min(k, counted);
+          const picked = new Set<number>();
+          while (picked.size < kk) picked.add(9 + rng.nextInt(0, counted - 1));
+          for (const pos of picked) rx[Math.floor(pos / 7)] ^= 1 << pos % 7;
+          const c = new BerCounter();
+          for (const v of rx) c.pushFrame(v, true);
+          const s = c.snapshot();
+          expect(s).toEqual({ ...s, bits: counted, errors: kk, synced: true, resyncs: 0 });
+          expect(s.ber).toBeCloseTo(kk / counted, 15);
+          expect([s.lo, s.hi]).toEqual([wilson95(kk, counted).lo, wilson95(kk, counted).hi]);
+        },
+      ),
+      { numRuns: BER_RUNS },
+    );
+  });
+
+  it('pn9Frames: 7-bit bytes; invalid arguments throw a RangeError', () => {
+    const f = pn9Frames(300, { startFrame: 5 });
+    expect(f.every((v) => v <= 127)).toBe(true);
+    expect(pn9Frames(0)).toEqual(new Uint8Array(0));
+    for (const bad of [-1, 1.5, NaN]) {
+      expect(() => pn9Frames(bad)).toThrow(RangeError);
+      expect(() => pn9Frames(3, { startFrame: bad })).toThrow(RangeError);
+    }
+  });
+
+  it('BerCounter: framing errors count 7 errors once synced, sync needs 9 reliable bits, a frame slip resynchronises', () => {
+    const tx = pn9Frames(400);
+    // Before sync, a framing error restarts the load: nothing counted.
+    const a = new BerCounter();
+    a.pushFrame(tx[0], true);
+    a.pushFrame(tx[1], false);
+    expect(a.snapshot()).toMatchObject({ bits: 0, errors: 0, synced: false });
+    // Synced: a framing-error frame counts its 7 bits as errors and the LFSR keeps running.
+    const b = new BerCounter();
+    for (let i = 0; i < 10; i++) b.pushFrame(tx[i], i !== 5);
+    expect(b.snapshot()).toMatchObject({ bits: 70 - 9, errors: 7, synced: true, resyncs: 0 });
+    // A lost frame (7-bit slip): more than 20 of 100 bits wrong, one resync, then error-free.
+    const c = new BerCounter();
+    for (let i = 0; i < 400; i++) if (i !== 100) c.pushFrame(tx[i], true);
+    const s = c.snapshot();
+    expect(s.synced).toBe(true);
+    expect(s.resyncs).toBe(1);
+    const errorsAfterSlip = s.errors;
+    expect(errorsAfterSlip).toBeGreaterThan(20);
+    expect(errorsAfterSlip).toBeLessThanOrEqual(100);
+    // An out-of-range value is treated like a framing error.
+    const d = new BerCounter();
+    for (let i = 0; i < 4; i++) d.pushFrame(tx[i], true);
+    d.pushFrame(200, true);
+    expect(d.snapshot()).toMatchObject({ errors: 7 });
+    d.reset();
+    expect(d.snapshot()).toEqual({ bits: 0, errors: 0, ber: 0, lo: 0, hi: 1, synced: false, resyncs: 0 });
+  });
+
+  it('Wilson interval: reference values, [0, 1] for 0 bits, NaN for invalid arguments, lo <= p <= hi', () => {
+    const w = wilson95(5, 10);
+    expect(w.lo).toBeCloseTo(0.2366, 4);
+    expect(w.hi).toBeCloseTo(0.7634, 4);
+    expect(wilson95(0, 10).lo).toBe(0);
+    expect(wilson95(0, 10).hi).toBeCloseTo(1.96 ** 2 / (10 + 1.96 ** 2), 12);
+    expect(wilson95(10, 10).hi).toBe(1);
+    expect(wilsonInterval(3, 40, 1.96)).toEqual(wilson95(3, 40));
+    expect(wilson95(0, 0)).toEqual({ lo: 0, hi: 1 });
+    for (const [e, n, z] of [
+      [1.5, 10, 1.96],
+      [-1, 10, 1.96],
+      [11, 10, 1.96],
+      [1, 10, 0],
+      [1, 10, -1],
+      [1, 10, NaN],
+      [1, NaN, 1.96],
+    ]) {
+      const r = wilsonInterval(e, n, z);
+      expect(Number.isNaN(r.lo) && Number.isNaN(r.hi), `${e} ${n} ${z}`).toBe(true);
+    }
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: 1e6 }), fc.double({ min: 0, max: 1, noNaN: true }), fc.double({ min: 0.1, max: 5, noNaN: true }), (n, f, z) => {
+        const e = Math.floor(f * n);
+        const r = wilsonInterval(e, n, z);
+        const wider = wilsonInterval(e, n, z * 1.5);
+        expect(r.lo).toBeLessThanOrEqual(e / n + 1e-12);
+        expect(r.hi).toBeGreaterThanOrEqual(e / n - 1e-12);
+        expect(r.lo).toBeGreaterThanOrEqual(0);
+        expect(r.hi).toBeLessThanOrEqual(1);
+        expect(wider.lo).toBeLessThanOrEqual(r.lo + 1e-12);
+        expect(wider.hi).toBeGreaterThanOrEqual(r.hi - 1e-12);
+      }),
+      { numRuns: NUM_RUNS },
+    );
+  });
+});
+
+describe('v23-modem task 10: quality events', () => {
+  it('M2M4 estimator: S and N from the moments, kurtosis-corrected; snrReport follows R5', () => {
+    // Constant envelope S = 1 plus proper complex Gaussian noise N = 0.1: M2 = 1.1, M4 = 1 + 0.4 + 0.02.
+    const plain = m2m4(1.1, 1.42);
+    expect(plain.signal).toBeCloseTo(1, 12);
+    expect(plain.noise).toBeCloseTo(0.1, 12);
+    // Envelope kurtosis k: M4 = k S^2 + 4 S N + 2 N^2.
+    const k = 1.0105;
+    const corr = m2m4(1.1, k + 0.4 + 0.02, k);
+    expect(corr.signal).toBeCloseTo(1, 12);
+    expect(corr.noise).toBeCloseTo(0.1, 12);
+    expect(m2m4(1, 2.5).snr).toBe(0); // 2 M2^2 - M4 < 0: noise only
+    expect(m2m4(1, 1).snr).toBe(Infinity); // clean constant envelope
+    const r = snrReport(100, 2100, 1200);
+    expect(r.snrBandDb).toBeCloseTo(20, 12);
+    expect(r.snr3kDb).toBeCloseTo(20 + 10 * Math.log10(2100 / 3000), 12);
+    expect(r.ebN0Db).toBeCloseTo(20 + 10 * Math.log10(2100 / 1200), 12);
+    expect(snrReport(0, 2100, 1200).snrBandDb).toBe(-Infinity);
+  });
+
+  it('every 100 ms while the carrier is on, none when it is off; SNR units follow B_n; parity rate over the last 100 frames; offset from the threshold', () => {
+    const fs = 16000;
+    const bn = forwardNoiseBandwidth(fs);
+    const bytes = pn9Frames(150);
+    const m = mustModulate(bytes, { sampleRate: fs, bitErrors: [15, 37] }); // parity errors in frames 1 and 3
+    const silence = new Float32Array(Math.round(0.5 * fs));
+    const x = concatF32([silence, mustApply(m, { sampleRate: fs, seed: 7, noise: { kind: 'snr3k', db: 25 } }), silence]);
+    const events = demodWith(x, fs, undefined);
+    const q = qualityOf(events);
+    const on = events.filter((e) => e.type === 'carrier');
+    expect(on.map((e) => (e as { on: boolean }).on)).toEqual([true, false]);
+    const [tOn, tOff] = on.map((e) => e.atSample);
+    expect(q.length).toBeGreaterThan(5);
+    for (const e of q) {
+      expect(e.atSample % 1600).toBe(0);
+      expect(e.atSample).toBeGreaterThan(tOn);
+      expect(e.atSample).toBeLessThan(tOff);
+      if (Number.isFinite(e.snrBandDb)) {
+        expect(e.snr3kDb - e.snrBandDb).toBeCloseTo(10 * Math.log10(bn / 3000), 9);
+        expect(e.ebN0Db - e.snrBandDb).toBeCloseTo(10 * Math.log10(bn / 1200), 9);
+      } else {
+        // N <= 0 (+Infinity) or no signal (-Infinity): the three values agree.
+        expect([e.snr3kDb, e.ebN0Db]).toEqual([e.snrBandDb, e.snrBandDb]);
+      }
+      expect(Math.abs(e.offsetHz)).toBeLessThan(20);
+    }
+    // Consecutive boundaries: none skipped while the carrier is on (requirement 9.1).
+    for (let i = 1; i < q.length; i++) expect(q[i].atSample - q[i - 1].atSample).toBe(1600);
+    // The estimates dated within 70 ms before the carrier off are dropped (silence in the moments).
+    expect(q[q.length - 1].atSample).toBeLessThanOrEqual(tOff - 0.07 * fs);
+    // 2 parity errors among the first frames, then 0 once they leave the last 100.
+    const chars = charsOf(events);
+    expect([chars[1].parityOk, chars[3].parityOk]).toEqual([false, false]);
+    // Any other parity error is a frame read from the silence after the page while the carrier
+    // off is pending (task 7 behaviour): a framing error, after the 150 page frames.
+    for (const [i, c] of chars.entries()) if (!c.parityOk && i !== 1 && i !== 3) expect([i >= 150, c.framingOk]).toEqual([true, false]);
+    for (const e of q) {
+      const before = chars.filter((c) => c.atSample + 9.75 * (fs / 1200) < e.atSample).slice(-100);
+      const expected = before.length > 0 ? before.filter((c) => !c.parityOk).length / before.length : 0;
+      expect(e.parityErrorRate, `at ${e.atSample}`).toBeCloseTo(expected, 12);
+    }
+    expect(q.some((e) => e.parityErrorRate > 0)).toBe(true);
+    expect(q[q.length - 1].parityErrorRate).toBe(0);
+    // The last estimates read 25 dB in 3 kHz within 1 dB.
+    expect(Math.abs(q[q.length - 1].snr3kDb - 25)).toBeLessThanOrEqual(1);
+    // Offset: an offset page reports offsetHz = markHz - 1300 in adaptive mode.
+    const y = mustApply(mustModulate(bytes, { sampleRate: fs }), { sampleRate: fs, seed: 8, offsetHz: 150, noise: { kind: 'snr3k', db: 25 } });
+    const qo = qualityOf(demodWith(y, fs, 'adaptive'));
+    expect(Math.abs(qo[qo.length - 1].offsetHz - 150)).toBeLessThanOrEqual(20);
+    expect(qualityOf(demodWith(y, fs, 'fixed')).every((e) => e.offsetHz === 0)).toBe(true);
+  });
+
+  it('M10 SNR estimator: for band SNR in [0, 30] dB, the estimate is within ±1 dB (mean over 10 seeds)', () => {
+    const rates = isSlowTestsEnabled() ? [8000, 16000, 44100, 48000] : [16000];
+    const targets = isSlowTestsEnabled() ? [0, 5, 10, 15, 20, 25, 30] : [0, 15, 30];
+    const report: string[] = [];
+    let worst = 0;
+    for (const fs of rates) {
+      const bn = forwardNoiseBandwidth(fs);
+      const x = mustModulate(pn9Frames(300), { sampleRate: fs });
+      for (const g of targets) {
+        let sum = 0;
+        for (let seed = 1; seed <= 10; seed++) {
+          const y = mustApply(x, { sampleRate: fs, seed, noise: { kind: 'ebN0', db: g + 10 * Math.log10(bn / 1200) } });
+          // Estimates with a full second of moments: from 1.2 s (lead 0.1 s, carrier on, 1 s).
+          const q = qualityOf(demodWith(y, fs, undefined)).filter((e) => e.atSample >= 1.2 * fs);
+          expect(q.length, `fs=${fs} g=${g} seed=${seed}`).toBeGreaterThan(5);
+          sum += q.reduce((s, e) => s + e.snrBandDb, 0) / q.length;
+        }
+        const mean = sum / 10;
+        worst = Math.max(worst, Math.abs(mean - g));
+        report.push(`${fs}/${g}: ${mean.toFixed(2)}`);
+        expect(Math.abs(mean - g), `fs=${fs} band SNR ${g} dB: mean estimate ${mean}`).toBeLessThanOrEqual(1);
+      }
+    }
+    console.log(`M10 mean band SNR estimate per fs/target: ${report.join(', ')}; worst |error| ${worst.toFixed(2)} dB`);
+  });
+});
+
+describe('v23-modem task 10: BER under noise (slow mode)', () => {
+  // design.md "Testing": the Monte Carlo property M6 runs in slow mode only.
+  it.runIf(isSlowTestsEnabled())('M6 noise: at Eb/N0 >= 12 dB (target, to calibrate), BER on 20 000 PN9 bits is <= 1e-3 for 20 seeds', () => {
+    const fs = 16000;
+    const ebN0Db = 12;
+    // 3 200 frames (22 400 bits): lost frames are not compared, so at least 20 000 bits remain.
+    const x = mustModulate(pn9Frames(3200), { sampleRate: fs });
+    const bers: string[] = [];
+    let failing = 0;
+    const results: { seed: number; bits: number; ber: number }[] = [];
+    for (let seed = 1; seed <= 20; seed++) {
+      const y = mustApply(x, { sampleRate: fs, seed, noise: { kind: 'ebN0', db: ebN0Db } });
+      const counter = new BerCounter();
+      for (const c of charsOf(demodWith(y, fs, undefined))) counter.pushFrame(c.value, c.framingOk);
+      const s = counter.snapshot();
+      results.push({ seed, bits: s.bits, ber: s.ber });
+      bers.push(s.ber.toExponential(2));
+      if (s.ber > 1e-3 || s.bits < 20000) failing++;
+    }
+    console.log(`M6 at Eb/N0 = ${ebN0Db} dB, BER per seed: ${bers.join(' ')}; ${failing} of 20 seeds fail`);
+    for (const r of results) {
+      expect(r.ber, `seed ${r.seed}`).toBeLessThanOrEqual(1e-3);
+      expect(r.bits, `seed ${r.seed}`).toBeGreaterThanOrEqual(20000);
+    }
   });
 });
