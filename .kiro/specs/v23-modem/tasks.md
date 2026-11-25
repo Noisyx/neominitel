@@ -67,8 +67,8 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - [x] 11.3 Property test M12.
   - _Requirements: 10.4_
 
-- [ ] 12. Calibration `[MVP]`
-  - Run `scripts/calibrate-modem.ts`, set the M6 Eb/N0 target and the connection-sequence durations, record everything in `docs/calibration.md`. (M6 part done early, with task 11: 16.5 dB. Connection-sequence durations still to do.)
+- [x] 12. Calibration `[MVP]`
+  - Run `scripts/calibrate-modem.ts`, set the M6 Eb/N0 target and the connection-sequence durations, record everything in `docs/calibration.md`. (M6: 16.5 dB, task 11. Connection defaults kept (700/150/300 ms) after measurement against the receiver; the check against a reference recording (requirement 3.2) waits for the first license-checked recording, task 16. Defect found and fixed: adaptive initialisation on noise, design.md "Threshold", steady-window gate.)
   - _Requirements: 3.2, 9.3_
 
 - [ ] 13. Performance `[MVP]`

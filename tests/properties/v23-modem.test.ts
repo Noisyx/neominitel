@@ -67,7 +67,7 @@ import {
 import { createDiscriminator, mixerPhaseCycles, type Discriminator } from '../../src/modem/discriminator';
 import { carrierLevelDbfs, createDetector } from '../../src/modem/carrier';
 import { createDemodulator } from '../../src/modem/demodulator';
-import { fixedThresholdHz, softValue } from '../../src/modem/threshold';
+import { ADAPTIVE_INIT_MAX_OFFSET_HZ, ADAPTIVE_INIT_TIMEOUT_MS, fixedThresholdHz, softValue } from '../../src/modem/threshold';
 import { createUart, type Uart, type UartChar } from '../../src/modem/uart';
 import {
   STANDARD_SAMPLE_RATES,
@@ -3751,5 +3751,58 @@ describe('v23-modem task 11: theory curves', () => {
       expect(data.lo[i]).toBeCloseTo(w.lo, 12);
       expect(data.hi[i]).toBeCloseTo(w.hi, 12);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 12: calibration (requirements 3.2 and 9.3; docs/calibration.md)
+
+describe('v23-modem task 12: calibration', () => {
+  it('connection defaults: a noisy line (20 dB over sequence, silence and page) gives one connect and the page, in both modes', () => {
+    expect(CONNECTION_DEFAULTS).toEqual({ answerToneMs: 700, silenceMs: 150, carrierMs: 300 });
+    const rates = isSlowTestsEnabled() ? STANDARD_SAMPLE_RATES : ([8000, 16000, 48000] as const);
+    for (const fs of rates) {
+      const x = concatF32([connectionSequence({ sampleRate: fs }), pageAt(fs)]);
+      for (const seed of [1, 2]) {
+        const y = mustApply(x, { sampleRate: fs, seed, noise: { kind: 'snr3k', db: 20 } });
+        for (const mode of ['adaptive', 'fixed'] as const) {
+          const events = demodWith(y, fs, mode);
+          const tag = `fs=${fs} seed=${seed} ${mode}`;
+          expect(events.filter((e) => e.type === 'connect'), tag).toHaveLength(1);
+          // The carrier stays on in the noisy silence, so noise frames may come first: the page
+          // is the exact end of the character list.
+          const values = charsOf(events).map((c) => c.value);
+          expect(values.slice(-PAGE_BYTES.length), tag).toEqual(Array.from(PAGE_BYTES));
+        }
+      }
+    }
+  });
+
+  it('adaptive initialisation uses the first steady mark window: not noise, not the answer tone (regression of task 12)', () => {
+    const fs = 16000;
+    // 300 ms of noise alone, then the sequence and an offset page, all at 20 dB: the carrier is on
+    // from the noise, and mu_mark must come from the mark carrier, not from noise or 2100 Hz.
+    const noise = new Float32Array(Math.round(0.3 * fs));
+    const x = concatF32([noise, connectionSequence({ sampleRate: fs }), mustApply(pageAt(fs), { sampleRate: fs, seed: 3, offsetHz: 200 })]);
+    const y = mustApply(x, { sampleRate: fs, seed: 4, noise: { kind: 'snr3k', db: 20 } });
+    const events = demodWith(y, fs, 'adaptive');
+    expect(charsOf(events).map((c) => c.value).slice(-PAGE_BYTES.length)).toEqual(Array.from(PAGE_BYTES));
+    // The connection carrier is nominal: mark is learnt at 1300 Hz first, then follows the offset
+    // only through the decision-directed updates (task 8 limit: no re-initialisation without a
+    // carrier drop). The estimate stays near the nominal mark, never at 2100 Hz or at noise.
+    const marks = events.filter((e): e is Extract<DemodEvent, { type: 'diag' }> => e.type === 'diag').map((d) => d.markHz);
+    expect(Math.max(...marks)).toBeLessThan(1300 + ADAPTIVE_INIT_MAX_OFFSET_HZ);
+  });
+
+  it('adaptive initialisation times out: with no steady window, the UART starts on the nominal threshold', () => {
+    const fs = 8000;
+    // Eb/N0 = 6 dB: no 20 ms window passes the std gate; characters must still be decoded (the
+    // data are mostly wrong at this level, but the receiver runs, like the fixed mode).
+    const y = mustApply(mustModulate(pn9Frames(400), { sampleRate: fs }), { sampleRate: fs, seed: 5, noise: { kind: 'ebN0', db: 6 } });
+    const adaptive = charsOf(demodWith(y, fs, 'adaptive'));
+    const fixed = charsOf(demodWith(y, fs, 'fixed'));
+    expect(adaptive.length).toBeGreaterThan(fixed.length / 2);
+    // The signal lasts several times the timeout, so the UART cannot have waited longer than it.
+    expect(adaptive[0].atSample).toBeLessThan(Math.round((ADAPTIVE_INIT_TIMEOUT_MS / 1000 + 0.2) * fs));
   });
 });

@@ -3,7 +3,114 @@
 Measured thresholds of the `v23-modem` properties (tech.md: a numeric threshold changes only through a
 calibration, with its reason recorded here). All figures are simulations (line simulator of task 9,
 A7 noise convention of `docs/math.md` section 2), never hardware measurements. Reproduce with
-`npx tsx scripts/calibrate-modem.ts` (deterministic, fixed seeds).
+`npx tsx scripts/calibrate-modem.ts` (deterministic, fixed seeds). `CAL_SECTIONS=connection,snr,ber,m6`
+selects the sections; M6 takes about 40 minutes, the other sections a few minutes. Task 12 ran every
+section on commit `d228387` plus the task 12 changes; M6 was run in task 11 and re-checked by the
+slow M6 test after the task 12 change.
+
+## Connection sequence (requirement 3.2)
+
+**Defaults kept:** answer tone 700 ms, silence 150 ms, mark carrier 300 ms (`CONNECTION_DEFAULTS` in
+`src/modem/modulator.ts`, also used by Role A's line engine).
+
+**Reference recording: not available.** Requirement 3.2 asks for the defaults to be checked against a
+reference recording. The project has no license-checked V.23 recording yet (`docs/licenses.md`: none
+bundled; `tests/fixtures/` is empty). This part of requirement 3.2 stays open and moves to task 16
+(interoperability), which adds the first license-checked recording. What follows checks the defaults
+against the receiver only.
+
+**Normative context, not checked in this session.** ITU-T V.25 specifies the 2100 Hz answer tone
+(2.6 to 4.0 s) and a short silence of about 75 ms before the data carrier
+([ITU-T V.25](https://www.itu.int/rec/T-REC-V.25)). These values are quoted from memory; the PDF could
+not be read here. The NeoMinitel defaults are shorter on purpose (the demo plays the whole sequence,
+product.md), so they are a documented simplification, not V.25 values.
+
+**Measured against the receiver** (`CAL_SECTIONS=connection`; 8 standard rates; noise γ_3k = 20 dB
+over the whole line, silence included):
+
+| Check | Result | Default | Margin |
+|---|---|---|---|
+| Sequence + page, clean, both modes | page decoded, 1 `connect`, at every rate | | |
+| Sequence + page, 20 dB noise, both modes, 5 seeds | 40/40 per mode (page is the exact end of the characters) | | |
+| Shortest answer tone giving `connect` | 493 ms | 700 ms | 207 ms |
+| Shortest silence for which the page decodes (clean, and 20 dB) | 0 ms | 150 ms | the silence only has to exist |
+| Shortest mark carrier giving `carrier` on after the silence | 20 ms | 300 ms | 280 ms |
+
+- **`connect` at 493 ms.** The detector needs 25 consecutive 20 ms blocks with at least half their
+  power at 2100 Hz. A tone ending inside the 25th block still fills more than half of it, so tones
+  from 493 ms give `connect` (450 ms gives none, task 7 test). Requirement 3.3 ("at least 500 ms
+  gives `connect`") holds.
+- **Noise characters.** With noise, the carrier stays on in the silence (noise at γ_3k = 20 dB reads
+  about −28 dBFS, above −45 dBFS), so noise frames are decoded before the page: about 65 per run in
+  fixed mode, 2 to 5 in adaptive mode (the UART waits for the steady-window initialisation below).
+
+### Adaptive initialisation (defect found by this calibration, fixed)
+
+With the 20 dB line, the first version of this check failed in adaptive mode at every rate. The
+carrier went on with the noise at 20 ms, the 20 ms initialisation window averaged noise, and μ_mark
+was learnt at 1 713 to 1 993 Hz (probe at 8 and 48 kHz, seeds 1 and 2). The threshold then sat
+above both tones and the page was not decoded (4 of 4 cases; the fixed mode decoded it).
+
+Fix (design.md "Threshold", steady-window gate): a 20 ms window initialises μ_mark only if the
+standard deviation of its estimates is ≤ 500 Hz and its mean is within 500 Hz of 1300 Hz; otherwise
+the next window is tried, for up to 1 s after carrier on, then the UART runs on the nominal threshold.
+
+Statistics of 20 ms windows of discriminator estimates (5 seeds of 2 s per case; a mark tone of
+amplitude 0.5, noise at the matching level):
+
+| Window content | 8 kHz | 16 kHz | 48 kHz |
+|---|---|---|---|
+| mark, Eb/N0 8 dB: std median / max | 360 / 623 Hz | 391 / 737 Hz | 389 / 757 Hz |
+| mark, Eb/N0 10 dB: std median / max | 256 / 476 Hz | 265 / 658 Hz | 268 / 570 Hz |
+| mark, Eb/N0 12 dB: std median / max | 192 / 430 Hz | 197 / 401 Hz | 199 / 420 Hz |
+| mark, Eb/N0 20 dB: std max; \|mean − 1300\| max | 95 Hz; 3 Hz | 107 Hz; 4 Hz | 103 Hz; 4 Hz |
+| noise alone: std min | 633 Hz | 670 Hz | 664 Hz |
+| answer tone: mean, std | 2100 Hz, 0.8 Hz | 2100 Hz, 0.7 Hz | 2100 Hz, 0.6 Hz |
+
+500 Hz separates a mark carrier from noise from Eb/N0 12 dB (where decoding starts to work, curve 3)
+and rejects the answer tone by its mean. After the fix, the same check passes 40/40 in both modes,
+and the golden digests, M5 and M7 are unchanged.
+
+## SNR estimator bias (requirement 9.3)
+
+`CAL_SECTIONS=snr`: mean of the `quality` band SNR (estimates with 1 s of moments) minus the true band
+SNR, PN9 traffic of 300 frames, 10 seeds. Target ±1 dB.
+
+| fs | 0 dB | 5 dB | 10 dB | 15 dB | 20 dB | 25 dB | 30 dB |
+|---|---|---|---|---|---|---|---|
+| 8 000 | −0.04 | −0.03 | −0.04 | −0.05 | −0.09 | −0.20 | −0.54 |
+| 16 000 | −0.29 | −0.16 | −0.12 | −0.09 | −0.06 | −0.01 | +0.13 |
+| 44 100 | +0.03 | −0.01 | −0.02 | −0.02 | +0.00 | +0.06 | +0.23 |
+| 48 000 | −0.11 | −0.06 | −0.06 | −0.06 | −0.06 | −0.05 | +0.01 |
+
+Worst bias 0.54 dB (8 kHz, 30 dB): requirement 9.3 holds with 0.46 dB of margin. The bias depends on the
+traffic through the envelope kurtosis (design.md "Quality"); this table is for PN9 traffic.
+
+## BER against Eb/N0, both threshold modes
+
+`CAL_SECTIONS=ber`: 16 kHz, 5 seeds of at least 20 000 compared bits, errors pooled, `BerCounter`
+(framing slips included, like curve 3 and 3615 MATHS).
+
+| Eb/N0 (dB) | adaptive | fixed |
+|---|---|---|
+| 8 | 3.66·10⁻¹ | 3.60·10⁻¹ |
+| 9 | 2.62·10⁻¹ | 2.56·10⁻¹ |
+| 10 | 1.60·10⁻¹ | 1.50·10⁻¹ |
+| 11 | 8.19·10⁻² | 7.89·10⁻² |
+| 12 | 3.52·10⁻² | 3.56·10⁻² |
+| 13 | 1.10·10⁻² | 1.17·10⁻² |
+| 14 | 3.55·10⁻³ | 3.75·10⁻³ |
+| 15 | 5.98·10⁻⁴ | 7.77·10⁻⁴ |
+| 16 | 8.9·10⁻⁶ | 0 |
+| 17 | 0 | 0 |
+| 18 | 0 | 0 |
+
+Without an offset, both modes are equivalent within the spread of 5 seeds (the adaptive mode is
+slightly worse below 11 dB, where some decision-directed updates use wrong decisions). The adaptive
+mode is the default because it also tracks offsets (M7). Curve 3 was regenerated after the task 12
+change: identical from 10 dB up, within 0.2 % at 8 and 9 dB; below that the UART often starts only
+after the 1 s timeout, so fewer bits are compared (66 465 instead of 80 645 at 0 dB) and the counter
+reads 0.70 instead of 0.68 at 0 dB.
 
 ## M6: BER under noise
 
