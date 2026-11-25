@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactElement } from 'react';
+import { CHANNELS } from '../../modem';
 import type { LineMode } from './ModeBar';
 
 export interface StartScreenProps {
@@ -30,7 +31,7 @@ export function StartScreen({
       <p className="nm-start-caption">
         {isServer
           ? 'Mode Serveur : cet appareil diffuse un signal V.23 pur sur son haut-parleur pour un terminal voisin placé en mode Écoute.'
-          : 'Ici, chaque page voyage à nouveau par le son d’un vrai modem V.23 à 1200 bauds.'}
+          : `Ici, chaque page voyage à nouveau par le son d’un vrai modem V.23 à ${CHANNELS.forward.baud} bauds.`}
       </p>
       <div className="nm-start-actions">
         <button

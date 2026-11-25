@@ -11,7 +11,7 @@ import {
   type ActiveMicCapture,
 } from '../audio/capture';
 import { createGaplessPlayer, type GaplessPlayer } from '../audio/playback';
-import type { DiagEvent, QualityEvent } from '../modem';
+import { ANSWER_TONE_HZ, CHANNELS, FRAME, type DiagEvent, type QualityEvent } from '../modem';
 import {
   ALL_SERVICE_IDS,
   connectRouter,
@@ -859,7 +859,7 @@ export function App(): ReactElement {
         return 'Micro en attente';
       }
       return state.carrierOn
-        ? 'Réception micro · Porteuse V.23 (120 car/s)'
+        ? `Réception micro · Porteuse V.23 (${CHANNELS.forward.baud / FRAME.bitsPerFrame} car/s)`
         : 'Écoute micro · En attente de porteuse';
     }
     if (state.mode === 'Fichier') {
@@ -870,10 +870,10 @@ export function App(): ReactElement {
       return `${prefix}Veille`;
     }
     if (state.session === 'connecting') {
-      return `${prefix}Appel V.23 · 2100 Hz…`;
+      return `${prefix}Appel V.23 · ${ANSWER_TONE_HZ} Hz…`;
     }
     return state.carrierOn
-      ? `${prefix}${serviceBadge} · 1200 bd`
+      ? `${prefix}${serviceBadge} · ${CHANNELS.forward.baud} bd`
       : `${prefix}${serviceBadge} · En ligne`;
   })();
 
@@ -885,7 +885,9 @@ export function App(): ReactElement {
       <header className="nm-topbar">
         <div className="nm-brand">
           <h1 className="nm-brand-title">NeoMinitel</h1>
-          <span className="nm-brand-meta">V.23 · 1200 / 75 bauds</span>
+          <span className="nm-brand-meta">
+            {`V.23 · ${CHANNELS.forward.baud} / ${CHANNELS.backward.baud} bauds`}
+          </span>
         </div>
 
         <ModeBar mode={state.mode} onSelectMode={handleSelectMode} />

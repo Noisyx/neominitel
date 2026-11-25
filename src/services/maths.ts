@@ -86,35 +86,35 @@ const MATHS_PROVISIONAL_PAGES: readonly PageSource[] = [
         row: 4,
         col: 2,
         segments: [
-          { text: 'Sur la voie descendante à 1200 bauds,', fg: COLOURS.WHITE },
+          { text: 'Sur la voie descendante du Minitel,', fg: COLOURS.WHITE },
         ],
       },
       {
         row: 5,
         col: 2,
         segments: [
-          { text: 'chaque bit dure 1/1200 s (0,833 ms) :', fg: COLOURS.WHITE },
+          { text: 'chaque bit devient une tonalité pure :', fg: COLOURS.WHITE },
         ],
       },
       {
         row: 8,
         col: 4,
         segments: [
-          { text: ' Bit 1 (mark)  -> 1300 Hz ', fg: COLOURS.BLACK, bg: COLOURS.GREEN },
+          { text: ' Bit 1 (mark)  -> tonalité grave ', fg: COLOURS.BLACK, bg: COLOURS.GREEN },
         ],
       },
       {
         row: 10,
         col: 4,
         segments: [
-          { text: ' Bit 0 (space) -> 2100 Hz ', fg: COLOURS.WHITE, bg: COLOURS.BLUE },
+          { text: ' Bit 0 (space) -> tonalité aiguë ', fg: COLOURS.WHITE, bg: COLOURS.BLUE },
         ],
       },
       {
         row: 13,
         col: 2,
         segments: [
-          { text: 'Indice de modulation : h = 800/1200', fg: COLOURS.CYAN },
+          { text: 'Indice de modulation : h = 2 / 3', fg: COLOURS.CYAN },
         ],
       },
       {

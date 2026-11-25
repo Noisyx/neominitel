@@ -4,6 +4,10 @@ Numerical experiments that de-risk the V.23 modem before and during implementati
 They are plain `.mjs` files run with Node (>= 18), with **zero dependencies**, and are **not part of
 the build**: nothing in `src/` imports them and they import nothing from `src/`.
 
+Exception: `demo-wav.ts` (task 4) is a TypeScript demo, run with `tsx`, that imports the public
+barrel `src/modem/index.ts` to write a listenable WAV. It is not an experiment and records no result;
+its output goes to `out/`, which is git-ignored (`prototypes/dsp/.gitignore`).
+
 **Every result here is a simulation.** It is never reported as a hardware measurement. Results that
 need real speakers, microphones and rooms belong to `docs/calibration.md`, section "Hardware".
 
@@ -20,6 +24,7 @@ Run from the repository root. Each script writes `results/<id>.csv` and `results
 | E2 discriminator accuracy and alignment | `node prototypes/dsp/e2-discriminator.mjs` | a few seconds |
 | E3c reference BER formula | `node prototypes/dsp/e3c-ber-formula.mjs` | about 1 min |
 | E3b Eb/N0 invariance of BER | `node prototypes/dsp/e3b-ebn0-invariance.mjs` | about 1 to 2 min |
+| WAV demo (writes `out/demo-3615-sommaire-<fs>.wav`) | `npx tsx prototypes/dsp/demo-wav.ts [sampleRate]` | < 2 s |
 
 Order matters: E1 writes `results/e1-selected.json` and `results/e1-summary.json`, which E3a, E7, E2
 and E3b read. Run E7 with no other heavy process, otherwise its timings are meaningless.

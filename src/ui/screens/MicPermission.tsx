@@ -1,4 +1,5 @@
 import type { ReactElement } from 'react';
+import { CHANNELS } from '../../modem';
 
 export type MicState = 'off' | 'asking' | 'on' | 'denied';
 
@@ -71,7 +72,9 @@ export function MicPermission({
       role="region"
       aria-label="Activation du mode Écoute"
     >
-      <p className="nm-start-memorial">Mode Écoute acoustique (1200 bauds)</p>
+      <p className="nm-start-memorial">
+        {`Mode Écoute acoustique (${CHANNELS.forward.baud} bauds)`}
+      </p>
       <p className="nm-start-caption">
         Ce terminal écoute le microphone brut et décode en direct les pages jouées par un
         autre appareil en mode Serveur.

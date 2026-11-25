@@ -43,3 +43,85 @@ export const SAMPLE_RATE_MAX_HZ = 96000;
 
 /** Answer tone of the connection sequence (requirement 3.1). */
 export const ANSWER_TONE_HZ = 2100;
+
+/** DSP design parameters of a channel's discriminator (design.md "Discriminator"). */
+export interface DiscriminatorParams {
+  /** Transition width of the Hamming low-pass, centred on `lowpassHz` (the -6 dB point). */
+  transitionHz: number;
+  /** Target decimated rate: D = max(1, floor(fs / decimatedRateHz)). */
+  decimatedRateHz: number;
+}
+
+/**
+ * Discriminator parameters per channel (decision T5-3). Kept out of ChannelSpec, which is part of
+ * the shared contract; these are DSP choices of the receiver, not V.23 line constants.
+ */
+export const DISCRIMINATOR: Record<ChannelId, DiscriminatorParams> = {
+  forward: { transitionHz: 400, decimatedRateHz: 16000 },
+  backward: { transitionHz: 60, decimatedRateHz: 2000 },
+} as const;
+
+/**
+ * Carrier and answer-tone detection (design.md "Carrier and answer tone", decisions T7-1 and T7-3).
+ * DSP choices of the receiver, outside ChannelSpec (same reason as DISCRIMINATOR).
+ */
+export const CARRIER = {
+  /** Default of DemodOptions.carrierOnDbfs: carrier on above this level, off 3 dB below. */
+  onDbfs: -45,
+  hysteresisDb: 3,
+  /** Power is averaged over this window. */
+  windowMs: 10,
+  /** The level must stay above the on threshold this long before `carrier` on. */
+  onHoldMs: 20,
+  /** The level must stay below the off threshold this long before `carrier` off. */
+  offHoldMs: 50,
+} as const;
+
+/**
+ * Quality estimation (design.md "Quality (M2M4 estimator)", task 10). DSP choices of the receiver,
+ * outside ChannelSpec (same reason as DISCRIMINATOR).
+ */
+export const QUALITY = {
+  /** A `quality` event at every absolute boundary of this period while the carrier is on (req. 9.1). */
+  intervalMs: 100,
+  /** The moments are averaged over the carrier-on estimates of the last averageMs. */
+  averageMs: 1000,
+  /** No estimate from less than minMs of carrier-on estimates. */
+  minMs: 50,
+  /** Running parity error rate over the last frames (requirement 9.4). */
+  parityFrames: 100,
+  /**
+   * Envelope kurtosis k_s = E|s|^4 / (E|s|^2)^2 of the forward FSK after the discriminator
+   * low-pass, measured in task 10 on PN9 traffic: 1.0104 to 1.0108 at 8, 16, 44.1 and 48 kHz.
+   */
+  forwardEnvelopeKurtosis: 1.0105,
+} as const;
+
+/** One-sided reference band of γ_3k, the default SNR (docs/math.md D5). */
+export const SNR_REFERENCE_BAND_HZ = 3000;
+
+/**
+ * Line simulator design choices (design.md "Line simulator API", task 9). DSP choices of the test
+ * channel, outside ChannelSpec (same reason as DISCRIMINATOR).
+ */
+export const LINE_SIMULATOR = {
+  /** Transition width of the Hamming-windowed Hilbert FIR (SSB frequency offset). */
+  hilbertTransitionHz: 300,
+  /** Half-width, in input samples, of the windowed-sinc kernel of the clock resampler. */
+  resamplerHalfWidth: 16,
+  /** Largest accepted |clockPpm| (10 %). */
+  maxClockPpm: 100_000,
+  /** Largest accepted number of hum harmonics. */
+  maxHarmonics: 20,
+  /** Largest accepted burst duration. */
+  maxBurstMs: 10_000,
+} as const;
+
+export const ANSWER_TONE = {
+  /** Goertzel block length. `connect` needs durationMs / blockMs consecutive tone blocks. */
+  blockMs: 20,
+  /** A block is a tone when its 2100 Hz power is at least this fraction of the block power. */
+  powerFraction: 0.5,
+  /** Continuous tone required before `connect` (requirement 3.3). */
+  durationMs: 500,
+} as const;
