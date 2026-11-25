@@ -112,6 +112,42 @@ change: identical from 10 dB up, within 0.2 % at 8 and 9 dB; below that the UART
 after the 1 s timeout, so fewer bits are compared (66 465 instead of 80 645 at 0 dB) and the counter
 reads 0.70 instead of 0.68 at 0 dB.
 
+## Performance (task 13, requirements 13.1 and 13.2)
+
+`npx tsx scripts/bench-modem.ts` (exit code 1 if a budget is missed). Developer machine: Intel Core
+i5-8350U laptop, Windows, Node v24.20.0, one thread. This is not the spec's "mid-range laptop" and
+its timings are noisy (`docs/math.md` 3.4: up to a factor 3 between runs at 96 kHz), so two complete
+runs are reported. Signal: 60 s of PN9 traffic with noise at γ_3k = 20 dB, default (adaptive)
+demodulator, pushed in 100 ms chunks (the line engine's block) and in 128-sample chunks (one
+AudioWorklet quantum). "+ Videotex" adds Role A's decoder (`createVideotexDecoder`) on every
+character, which is the receive pipeline of tech.md. Median of 5 runs after a warm-up.
+
+ms of CPU per second of audio (run 1 / run 2; run 1 was stopped before its last row and the
+modulator line):
+
+| fs | chunk | demodulator | x real time | demodulator + Videotex | budget |
+|---|---|---|---|---|---|
+| 48 000 | 4 800 | 26.9 / 31.9 | 37 / 31 | 27.2 / 30.3 | 60 (demod), 100 (pipeline): **pass** |
+| 48 000 | 128 | 28.1 / 29.9 | 36 / 33 | 33.0 / 29.8 | **pass** |
+| 44 100 | 4 410 | 39.7 / 47.0 | 25 / 21 | 36.3 / 39.9 | (no budget) |
+| 44 100 | 128 | 38.3 / 52.2 | 26 / 19 | 39.8 / 41.5 | (no budget) |
+| 96 000 | 9 600 | 46.0 / 42.4 | 22 / 24 | 55.0 / 42.0 | (no budget) |
+| 96 000 | 128 | — / 52.9 | — / 19 | — / 56.3 | (no budget) |
+
+- **Requirement 13.1 met.** At 48 kHz the demodulator needs at most 31.9 ms per second of audio:
+  60 s in about 1.9 s (budget 3.6 s), 31 to 37 times real time. With Videotex decoding, at most
+  33.0 ms per second (tech.md budget 100 ms). The FIR did not need profiling (tasks.md).
+- **Requirement 13.2 met.** The modulator renders 1 000 characters (8.48 s of audio at 48 kHz) in
+  24.5 ms (median of 20, run 2; budget 50 ms).
+- 44.1 kHz costs more than 48 kHz, as in E7: D = 2 instead of 3 gives more filter outputs per second.
+  96 kHz (D = 6) stays under 60 ms per second here, but it is outside the budget and at most 19
+  times real time; E7 measured up to 105 ms per second at 96 kHz on the same machine, so it should be
+  re-measured on the target devices (phones) before relying on it.
+- The 128-sample chunks cost little more than 100 ms chunks: the per-call overhead of `push` is small
+  next to the FIR.
+- Videotex decoding is not measurable above the run-to-run noise at 48 kHz (pipeline minus
+  demodulator: −1.6 to +4.9 ms per second).
+
 ## M6: BER under noise
 
 **Property (design.md):** at Eb/N0 ≥ X dB, the BER on 20 000 PN9 bits is ≤ 10⁻³ for 20 seeds.
