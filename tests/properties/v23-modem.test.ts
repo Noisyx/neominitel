@@ -37,8 +37,8 @@ import {
   writeWav,
   type WavErrorReason,
 } from '../../src/modem/wav';
-import { readWav as readWavPublic, writeWav as writeWavPublic, type ModulateOptions } from '../../src/modem';
-import { DISCRIMINATOR } from '../../src/modem/v23';
+import { readWav as readWavPublic, writeWav as writeWavPublic, type DemodEvent, type ModulateOptions } from '../../src/modem';
+import { CARRIER, DISCRIMINATOR } from '../../src/modem/v23';
 import {
   ComplexDecimatingFir,
   designLowpass,
@@ -47,6 +47,8 @@ import {
   noiseBandwidthHz,
 } from '../../src/modem/filters';
 import { createDiscriminator, mixerPhaseCycles, type Discriminator } from '../../src/modem/discriminator';
+import { carrierLevelDbfs, createDetector } from '../../src/modem/carrier';
+import { createDemodulator } from '../../src/modem/demodulator';
 import { fixedThresholdHz, softValue } from '../../src/modem/threshold';
 import { createUart, type Uart, type UartChar } from '../../src/modem/uart';
 import {
@@ -2326,4 +2328,359 @@ describe('v23-modem task 6.3: M8 clock offset at 20 dB SNR (3 kHz)', () => {
       expect(failures).toEqual([]);
     });
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 7: streaming demodulator. Events come from the public createDemodulator.
+
+const DEMOD_RUNS = isSlowTestsEnabled() ? 60 : 12;
+
+/** Pushes x through a fresh demodulator in chunks of the given lengths; the remainder goes last. */
+function demodEvents(x: Float32Array, fs: number, chunkLens: readonly number[] = [], o: { flush?: boolean } = {}): DemodEvent[] {
+  const r = createDemodulator({ sampleRate: fs, threshold: 'fixed' });
+  if (!r.ok) throw new Error(JSON.stringify(r.error));
+  const events: DemodEvent[] = [];
+  const push = (c: Float32Array): void => {
+    for (const e of r.value.push(c)) events.push(e);
+  };
+  let pos = 0;
+  for (const len of chunkLens) {
+    if (pos >= x.length) break;
+    const end = Math.min(x.length, pos + len);
+    push(x.subarray(pos, end));
+    pos = end;
+  }
+  push(x.subarray(pos));
+  if (o.flush !== false) for (const e of r.value.flush()) events.push(e);
+  return events;
+}
+
+function charsOf(events: readonly DemodEvent[]): Extract<DemodEvent, { type: 'char' }>[] {
+  return events.filter((e): e is Extract<DemodEvent, { type: 'char' }> => e.type === 'char');
+}
+
+/** A tone of `ms` milliseconds at `fHz`, amplitude A, starting at sample 0. */
+function toneMs(fs: number, fHz: number, ms: number, amp: number): Float32Array {
+  return synth(Math.round((fs * ms) / 1000), amp, (i) => (fHz * i) / fs);
+}
+
+describe('v23-modem task 7: streaming demodulator', () => {
+  it('factory: bad-sample-rate, bad-option for threshold, channel and carrierOnDbfs; setThresholdMode is a no-op', () => {
+    for (const fs of [7999, 96001, Number.NaN, Infinity]) {
+      expect(createDemodulator({ sampleRate: fs, threshold: 'fixed' })).toEqual({
+        ok: false,
+        error: { kind: 'bad-sample-rate', sampleRate: fs },
+      });
+    }
+    // Non-integer rates are accepted (design.md "Factory").
+    expect(createDemodulator({ sampleRate: 44100.3, threshold: 'fixed' }).ok).toBe(true);
+    for (const threshold of [undefined, 'adaptive' as const, 'auto' as never]) {
+      const r = createDemodulator({ sampleRate: 48000, threshold });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toMatchObject({ kind: 'bad-option', option: 'threshold' });
+    }
+    const back = createDemodulator({ sampleRate: 48000, channel: 'backward', threshold: 'fixed' });
+    expect(back).toMatchObject({ ok: false, error: { kind: 'bad-option', option: 'channel' } });
+    expect(createDemodulator({ sampleRate: 48000, threshold: 'fixed', carrierOnDbfs: Number.NaN })).toMatchObject({
+      ok: false,
+      error: { kind: 'bad-option', option: 'carrierOnDbfs' },
+    });
+    const ok = createDemodulator({ sampleRate: 48000, threshold: 'fixed' });
+    if (!ok.ok) throw new Error('demod');
+    expect(() => ok.value.setThresholdMode('adaptive')).not.toThrow();
+    // The documented no-op keeps 'fixed': a mark tone still decodes (adaptive would also, so this
+    // checks only that the call is accepted; the mode stays 'fixed' by construction until task 8).
+  });
+
+  it('D6: a carrier of amplitude A reads 20 log10(A) dBFS; A = 0.5 reads -6.02 dBFS (docs/math.md D6)', () => {
+    const fs = 48000;
+    const amps = [1, 0.5, 0.1, 0.01];
+    for (const A of amps) {
+      const x = toneMs(fs, FWD.markHz, 200, A);
+      const det = createDetector(fs, 3, CARRIER.onDbfs);
+      const d = makeDisc(fs);
+      const out = d.push(x);
+      const estimates = [];
+      for (let m = 0; m < out.count; m++) {
+        const t = out.firstTimeSamples + m * d.decimation;
+        if (t >= d.settledTimeSamples) estimates.push({ t, re: out.re[m], im: out.im[m] });
+      }
+      const ev = det.push(x, 0, estimates);
+      // The level is not returned; check the identity directly on the settled estimates.
+      let sum = 0;
+      for (const e of estimates) sum += e.re ** 2 + e.im ** 2;
+      const level = carrierLevelDbfs(sum / estimates.length);
+      expect(Math.abs(level - 20 * Math.log10(A)), `A=${A}`).toBeLessThan(0.2);
+      expect(ev.carrier.length).toBeGreaterThan(0);
+    }
+    expect(carrierLevelDbfs(0)).toBe(-Infinity);
+  });
+
+  it('carrier: on after 20 ms above the threshold, off after 50 ms below it, hysteresis 3 dB (requirement 8.3)', () => {
+    const fs = 48000;
+    // -6.02 dBFS at A = 0.5, so the on threshold -45 dBFS is A = 0.5 * 10^((-45 + 6.02)/20).
+    const aOn = 0.5 * 10 ** ((CARRIER.onDbfs - 20 * Math.log10(0.5)) / 20);
+    const above = toneMs(fs, FWD.markHz, 1500, aOn * 1.3); // above -45
+    const events = demodEvents(above, fs, [], { flush: false });
+    const on = events.find((e) => e.type === 'carrier' && e.on);
+    expect(on && on.type === 'carrier' && on.atSample).toBeGreaterThanOrEqual(Math.round(0.02 * fs) - 1);
+    expect(on && on.type === 'carrier' && on.atSample).toBeLessThanOrEqual(Math.round(0.05 * fs));
+    // Then silence: off 50 ms after the tone ends.
+    const withSilence = new Float32Array(above.length + Math.round(0.2 * fs));
+    withSilence.set(above);
+    const ev2 = demodEvents(withSilence, fs, [], { flush: false });
+    const off = ev2.filter((e) => e.type === 'carrier' && !e.on);
+    expect(off.length).toBe(1);
+    if (off[0].type === 'carrier') {
+      expect(off[0].atSample).toBeGreaterThanOrEqual(above.length + Math.round(0.05 * fs) - fs * 0.012);
+      expect(off[0].atSample).toBeLessThanOrEqual(above.length + Math.round(0.07 * fs));
+    }
+    // Below the on threshold the carrier never turns on, even when the level is still above the
+    // off threshold: hysteresis only delays the drop, it does not lower the level needed to start.
+    const weak = demodEvents(toneMs(fs, FWD.markHz, 500, aOn * 10 ** (-4 / 20)), fs, [], { flush: false });
+    expect(weak.some((e) => e.type === 'carrier')).toBe(false);
+    const justUnder = demodEvents(toneMs(fs, FWD.markHz, 500, aOn * 10 ** (-1 / 20)), fs, [], { flush: false });
+    expect(justUnder.some((e) => e.type === 'carrier')).toBe(false);
+    // Once on, a level between the two thresholds (2 dB under the on threshold, 1 dB over the off
+    // threshold) holds the carrier: it does not drop.
+    const midLen = Math.round(0.5 * fs);
+    const held = new Float32Array(above.length + midLen);
+    held.set(above, 0);
+    held.set(toneMs(fs, FWD.markHz, 500, aOn * 10 ** (-2 / 20)), above.length);
+    const heldEvents = demodEvents(held, fs, [], { flush: false });
+    expect(heldEvents.filter((e) => e.type === 'carrier')).toEqual([
+      expect.objectContaining({ type: 'carrier', on: true }),
+    ]);
+  });
+
+  it('connect: 500 ms of 2100 Hz gives one connect, 450 ms gives none; a page and noise give none (requirement 3.3)', () => {
+    const fs = 48000;
+    // flush releases the events held at the end of the input (design.md "Event dates and latency").
+    const tone = (ms: number, amp = 0.5) => demodEvents(toneMs(fs, ANSWER_TONE_HZ, ms, amp), fs);
+    const connects = (ms: number) => tone(ms).filter((e) => e.type === 'connect');
+    expect(connects(450)).toHaveLength(0);
+    const c500 = connects(500);
+    expect(c500).toHaveLength(1);
+    if (c500[0].type === 'connect') expect(Math.abs(c500[0].atSample - Math.round(0.5 * fs))).toBeLessThanOrEqual(1);
+    // Once per tone, re-armed after a gap.
+    const two = demodEvents(
+      (() => {
+        const a = toneMs(fs, ANSWER_TONE_HZ, 600, 0.5);
+        const gap = new Float32Array(Math.round(0.1 * fs));
+        const b = toneMs(fs, ANSWER_TONE_HZ, 600, 0.5);
+        const all = new Float32Array(a.length + gap.length + b.length);
+        all.set(a, 0);
+        all.set(b, a.length + gap.length);
+        return all;
+      })(),
+      fs,
+    );
+    expect(two.filter((e) => e.type === 'connect')).toHaveLength(2);
+    // A tone under the carrier threshold is not an answer tone.
+    expect(tone(700, 0.0001).filter((e) => e.type === 'connect')).toHaveLength(0);
+    // A page of data is not 500 ms of pure 2100 Hz.
+    const page = modulate(Uint8Array.from(ascii('3615 SOMMAIRE 3615 SOMMAIRE')), { sampleRate: fs });
+    if (!page.ok) throw new Error('modulate');
+    expect(demodEvents(page.value, fs).filter((e) => e.type === 'connect')).toHaveLength(0);
+    // The default connection sequence (700 ms of answer tone) gives exactly one.
+    const seq = connectionSequence({ sampleRate: fs });
+    expect(demodEvents(seq, fs).filter((e) => e.type === 'connect')).toHaveLength(1);
+  });
+
+  it('diag: at absolute 50 ms boundaries, at most every 50 ms, with the decimated discriminator output (requirement 8.4)', () => {
+    const fs = 48000;
+    const x = toneMs(fs, FWD.markHz, 1000, 0.5);
+    const every = Math.round(0.05 * fs);
+    const disc = makeDisc(fs);
+    // design.md "Event dates and latency": the latest estimate is dated (last kept input index) -
+    // (L - 1)/2 - D/2, and an event dated a is released by push once an estimate dated
+    // a + 9.75 T + D + 0.5 has arrived. Without flush, the diags of the last boundaries are held;
+    // flush releases them.
+    const D0 = disc.decimation;
+    const lastKept = Math.floor(x.length / D0) * D0 - 1;
+    const lastT = lastKept - disc.groupDelaySamples - D0 / 2;
+    const releaseLag = 9.75 * (fs / FWD.baud) + D0 + 0.5;
+    const withoutFlush = demodEvents(x, fs, [1, 7, 4000], { flush: false }).filter((e) => e.type === 'diag');
+    expect(withoutFlush.length).toBe(Math.floor((lastT - releaseLag) / every));
+    expect(withoutFlush.length).toBe(19);
+    const events = demodEvents(x, fs, [1, 7, 4000]);
+    const diags = events.filter((e): e is Extract<DemodEvent, { type: 'diag' }> => e.type === 'diag');
+    const D = Math.max(1, Math.floor(fs / 16000));
+    // 1000 ms is itself a boundary, so flush adds no extra diag: exactly 20, all distinct.
+    expect(diags.length).toBe(Math.floor(1000 / 50));
+    expect(new Set(diags.map((g) => g.atSample)).size).toBe(diags.length);
+    diags.forEach((g, i) => {
+      expect(g.atSample).toBe(Math.round((i + 1) * 0.05 * fs));
+      expect(g.decimation).toBe(D);
+      expect(g.thresholdHz).toBe(FWD.thresholdHz);
+      expect(g.markHz).toBe(FWD.markHz);
+      expect(g.spaceHz).toBe(FWD.spaceHz);
+      expect(g.nonFiniteCount).toBe(0);
+      // About 0.05 * fs / D estimates per diag, and they read the mark tone. In the last diag, the
+      // estimates dated within (L - 1)/2 of the end of the input see the zeros after it (flush):
+      // only the first half of that diag is checked.
+      expect(g.freqHz.length).toBeGreaterThan(700);
+      expect(g.freqHz.length).toBeLessThan(900);
+      const checked = i === diags.length - 1 ? g.freqHz.subarray(0, g.freqHz.length / 2) : g.freqHz;
+      for (const f of checked) expect(Math.abs(f - FWD.markHz)).toBeLessThan(30);
+    });
+    // A NaN in the input is counted once and does not throw.
+    const dirty = x.slice();
+    dirty[100] = Number.NaN;
+    dirty[5000] = Infinity;
+    const diags2 = demodEvents(dirty, fs, [], { flush: false }).filter((e) => e.type === 'diag');
+    const last = diags2[diags2.length - 1];
+    expect(last && last.type === 'diag' && last.nonFiniteCount).toBe(2);
+  });
+
+  it('diag bitWindows: the windows of a completed frame fall inside the frame and cover its 10 bits', () => {
+    const fs = 16000;
+    const bytes = Uint8Array.from([0x41]);
+    const m = modulate(bytes, { sampleRate: fs, leadIdleMs: 200, tailIdleMs: 100 });
+    if (!m.ok) throw new Error('modulate');
+    const diags = demodEvents(m.value, fs).filter((e): e is Extract<DemodEvent, { type: 'diag' }> => e.type === 'diag');
+    const windows = diags.flatMap((g) => g.bitWindows);
+    expect(windows).toHaveLength(10);
+    // A frame is reported whole, in a single diag.
+    expect(diags.filter((g) => g.bitWindows.length > 0).map((g) => g.bitWindows.length)).toEqual([10]);
+    const start = frameStarts(1, fs, 200, 0)[0];
+    const bit = fs / FWD.baud;
+    windows.forEach(([a, b], i) => {
+      expect(Math.abs(a - (start + i * bit))).toBeLessThan(bit / 2);
+      expect(b - a).toBeCloseTo(bit, 5);
+    });
+  });
+
+  it('bitWindows of a frame straddling a diag boundary: whole, in the diag that contains its decision time, for any chunking (regression)', () => {
+    // Frame edge 20 samples before a 50 ms boundary, decided about 9.75 bit periods later. Before
+    // the fix, 1-sample chunks lost the 2 windows that start before the boundary.
+    for (const fs of [16000, 44100, 48000]) {
+      const every = Math.round(0.05 * fs);
+      const boundary = 4 * every;
+      const bit = fs / FWD.baud;
+      const m = modulate(Uint8Array.from([0x55]), {
+        sampleRate: fs,
+        leadIdleMs: ((boundary - 20) / fs) * 1000,
+        tailIdleMs: 60,
+      });
+      if (!m.ok) throw new Error('modulate');
+      const whole = demodEvents(m.value, fs);
+      const byOne = demodEvents(m.value, fs, Array.from({ length: m.value.length }, () => 1));
+      expect(byOne, `fs=${fs}`).toEqual(whole);
+      const [c] = charsOf(whole);
+      expect(c, `fs=${fs}`).toMatchObject({ value: 0x55, parityOk: true, framingOk: true });
+      const carrying = whole.filter((e): e is Extract<DemodEvent, { type: 'diag' }> => e.type === 'diag' && e.bitWindows.length > 0);
+      expect(carrying.map((g) => g.bitWindows.length), `fs=${fs}`).toEqual([10]);
+      const decision = c.atSample + 9.75 * bit;
+      const g = carrying[0];
+      expect(g.atSample, `fs=${fs}`).toBeGreaterThan(decision - 1);
+      expect(g.atSample - every, `fs=${fs}`).toBeLessThanOrEqual(decision + 1);
+    }
+  });
+
+  it('flush: one final diag at the end of the input for the interval since the last boundary; the 50 ms grid resumes after it', () => {
+    const fs = 16000;
+    const every = Math.round(0.05 * fs);
+    const x = toneMs(fs, FWD.markHz, 130, 0.5); // ends 30 ms after the 100 ms boundary
+    const r = createDemodulator({ sampleRate: fs, threshold: 'fixed' });
+    if (!r.ok) throw new Error('demod');
+    const pushed = r.value.push(x);
+    const flushed = r.value.flush();
+    const diags = [...pushed, ...flushed].filter((e): e is Extract<DemodEvent, { type: 'diag' }> => e.type === 'diag');
+    expect(diags.map((g) => g.atSample)).toEqual([every, 2 * every, x.length]);
+    const last = diags[diags.length - 1];
+    // The last diag holds the settled estimates dated in [100 ms, end): no estimate dated after the end.
+    expect(last.freqHz.length).toBe(x.length - 2 * every);
+    // Estimates dated before end - (L - 1)/2 use real input only and read the mark tone; the last
+    // (L - 1)/2 see the zeros of the flush padding (the filter tail) and are not checked.
+    const tail = Math.ceil(makeDisc(fs).groupDelaySamples) + 1;
+    for (const f of last.freqHz.subarray(0, last.freqHz.length - tail)) expect(Math.abs(f - FWD.markHz)).toBeLessThan(30);
+    // After flush, time continues and the next diag is on the absolute grid (150 ms), not 50 ms
+    // after the end of the input.
+    const after = r.value.push(toneMs(fs, FWD.markHz, 100, 0.5)).filter((e) => e.type === 'diag');
+    expect(after[0]?.atSample).toBe(3 * every);
+  });
+
+  it('M1 through the public demodulator: createDemodulator decodes modulate(b), then flush, at 8 rates', () => {
+    const rng = createRng(77);
+    for (const fs of STANDARD_SAMPLE_RATES) {
+      const bytes = Uint8Array.from({ length: 40 }, () => Math.floor(rng.nextFloat() * 128));
+      const m = modulate(bytes, { sampleRate: fs });
+      if (!m.ok) throw new Error('modulate');
+      const chars = charsOf(demodEvents(m.value, fs));
+      expect(chars.map((c) => c.value), `fs=${fs}`).toEqual(Array.from(bytes));
+      expect(chars.every((c) => c.parityOk && c.framingOk), `fs=${fs}`).toBe(true);
+    }
+  });
+
+  it('M5 chunk invariance: any partition, empty chunks included, gives the same events', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(16000, 48000),
+        arbBytes7(1, 15),
+        fc.array(fc.integer({ min: 0, max: 5000 }), { maxLength: 25 }),
+        (fs, bytes, lens) => {
+          const seq = connectionSequence({ sampleRate: fs, answerToneMs: 500, silenceMs: 40, carrierMs: 40 });
+          const m = modulate(bytes, { sampleRate: fs, leadIdleMs: 60, tailIdleMs: 40 });
+          if (!m.ok) throw new Error('modulate');
+          const x = new Float32Array(seq.length + m.value.length);
+          x.set(seq, 0);
+          x.set(m.value, seq.length);
+          const whole = demodEvents(x, fs, []);
+          const parts = demodEvents(x, fs, [0, 1, ...lens]);
+          expect(parts).toEqual(whole);
+        },
+      ),
+      { numRuns: DEMOD_RUNS },
+    );
+  });
+
+  it('silence and a dropped carrier produce no characters; flush emits the carrier off and the tail', () => {
+    const fs = 48000;
+    const bytes = Uint8Array.from(ascii('AB'));
+    const m = modulate(bytes, { sampleRate: fs, leadIdleMs: 100, tailIdleMs: 30 });
+    if (!m.ok) throw new Error('modulate');
+    // Without flush the short tail may hold the last frame; with flush every byte comes out and
+    // the carrier ends off.
+    const flushed = demodEvents(m.value, fs);
+    expect(charsOf(flushed).map((c) => c.value)).toEqual([65, 66]);
+    const carriers = flushed.filter((e) => e.type === 'carrier');
+    expect(carriers[carriers.length - 1]).toMatchObject({ type: 'carrier', on: false });
+    // Pure silence: no carrier, no char.
+    const quiet = demodEvents(new Float32Array(Math.round(0.3 * fs)), fs);
+    expect(quiet.some((e) => e.type === 'carrier' || e.type === 'char')).toBe(false);
+  });
+
+  it('robustness: arbitrary samples never throw and events are well typed', () => {
+    const types = ['carrier', 'connect', 'char', 'diag'];
+    fc.assert(
+      fc.property(fc.float64Array({ minLength: 0, maxLength: 4000 }), (values) => {
+        const x = Float32Array.from(values, (v) => (Number.isFinite(v) ? Math.max(-10, Math.min(10, v)) : v));
+        let events: DemodEvent[] = [];
+        expect(() => {
+          events = demodEvents(x, 22050, [0, 1, 3]);
+        }).not.toThrow();
+        for (const e of events) {
+          expect(types).toContain(e.type);
+          expect(Number.isInteger(e.atSample)).toBe(true);
+          expect(e.atSample).toBeGreaterThanOrEqual(0);
+        }
+        expect(events.some((e) => e.type === 'quality')).toBe(false);
+      }),
+      { numRuns: DEMOD_RUNS },
+    );
+  });
+
+  it('no quality event before task 10 (decision T7-5); reset returns to the initial state', () => {
+    const fs = 16000;
+    const m = modulate(Uint8Array.from(ascii('Z')), { sampleRate: fs });
+    if (!m.ok) throw new Error('modulate');
+    const r = createDemodulator({ sampleRate: fs, threshold: 'fixed' });
+    if (!r.ok) throw new Error('demod');
+    const first = [...r.value.push(m.value), ...r.value.flush()];
+    expect(first.some((e) => e.type === 'quality')).toBe(false);
+    expect(charsOf(first).map((c) => c.value)).toEqual([90]);
+    r.value.reset();
+    expect([...r.value.push(m.value), ...r.value.flush()]).toEqual(first);
+  });
 });

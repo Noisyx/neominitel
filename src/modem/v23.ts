@@ -60,3 +60,28 @@ export const DISCRIMINATOR: Record<ChannelId, DiscriminatorParams> = {
   forward: { transitionHz: 400, decimatedRateHz: 16000 },
   backward: { transitionHz: 60, decimatedRateHz: 2000 },
 } as const;
+
+/**
+ * Carrier and answer-tone detection (design.md "Carrier and answer tone", decisions T7-1 and T7-3).
+ * DSP choices of the receiver, outside ChannelSpec (same reason as DISCRIMINATOR).
+ */
+export const CARRIER = {
+  /** Default of DemodOptions.carrierOnDbfs: carrier on above this level, off 3 dB below. */
+  onDbfs: -45,
+  hysteresisDb: 3,
+  /** Power is averaged over this window. */
+  windowMs: 10,
+  /** The level must stay above the on threshold this long before `carrier` on. */
+  onHoldMs: 20,
+  /** The level must stay below the off threshold this long before `carrier` off. */
+  offHoldMs: 50,
+} as const;
+
+export const ANSWER_TONE = {
+  /** Goertzel block length. `connect` needs durationMs / blockMs consecutive tone blocks. */
+  blockMs: 20,
+  /** A block is a tone when its 2100 Hz power is at least this fraction of the block power. */
+  powerFraction: 0.5,
+  /** Continuous tone required before `connect` (requirement 3.3). */
+  durationMs: 500,
+} as const;
