@@ -9,3 +9,16 @@ export * from './v23';
 export { modulate, connectionSequence } from './modulator';
 export { readWav, writeWav, WAV_ERROR_REASONS, type WavAudio, type WavErrorReason } from './wav';
 export { createDemodulator } from './demodulator';
+export {
+  createChannel,
+  applyChannel,
+  channelLatencySamples,
+  DEFAULT_HUM,
+  DEFAULT_BURSTS,
+  type ChannelParams,
+  type ChannelUpdate,
+  type LineChannel,
+  type HumParams,
+  type BurstParams,
+  type NoiseParams,
+} from './channel';

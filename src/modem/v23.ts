@@ -77,6 +77,26 @@ export const CARRIER = {
   offHoldMs: 50,
 } as const;
 
+/** One-sided reference band of γ_3k, the default SNR (docs/math.md D5). */
+export const SNR_REFERENCE_BAND_HZ = 3000;
+
+/**
+ * Line simulator design choices (design.md "Line simulator API", task 9). DSP choices of the test
+ * channel, outside ChannelSpec (same reason as DISCRIMINATOR).
+ */
+export const LINE_SIMULATOR = {
+  /** Transition width of the Hamming-windowed Hilbert FIR (SSB frequency offset). */
+  hilbertTransitionHz: 300,
+  /** Half-width, in input samples, of the windowed-sinc kernel of the clock resampler. */
+  resamplerHalfWidth: 16,
+  /** Largest accepted |clockPpm| (10 %). */
+  maxClockPpm: 100_000,
+  /** Largest accepted number of hum harmonics. */
+  maxHarmonics: 20,
+  /** Largest accepted burst duration. */
+  maxBurstMs: 10_000,
+} as const;
+
 export const ANSWER_TONE = {
   /** Goertzel block length. `connect` needs durationMs / blockMs consecutive tone blocks. */
   blockMs: 20,

@@ -78,6 +78,6 @@ export type ModemError =
   | { kind: 'bad-option'; option: string; reason: string }
   | { kind: 'wav'; reason: string };
 
-// The line simulator types (ChannelParams, LineChannel, HumParams, BurstParams) and the PN9/BER
-// types (BerSnapshot, BerCounter) are defined with their implementations in channel.ts (task 9)
-// and prbs.ts (task 10), as specified in design.md. They are not declared here before they exist.
+// The line simulator types (ChannelParams, LineChannel, HumParams, BurstParams) are defined with
+// their implementation in channel.ts (task 9) and the PN9/BER types (BerSnapshot, BerCounter) in
+// prbs.ts (task 10), as specified in design.md. index.ts re-exports them.

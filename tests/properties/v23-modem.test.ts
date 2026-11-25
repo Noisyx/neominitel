@@ -39,6 +39,15 @@ import {
   type WavErrorReason,
 } from '../../src/modem/wav';
 import { readWav as readWavPublic, writeWav as writeWavPublic, type DemodEvent, type ModulateOptions } from '../../src/modem';
+import {
+  DEFAULT_BURSTS,
+  DEFAULT_HUM,
+  applyChannel,
+  channelLatencySamples,
+  createChannel,
+  type ChannelParams,
+  type LineChannel,
+} from '../../src/modem';
 import { CARRIER, DISCRIMINATOR } from '../../src/modem/v23';
 import {
   ComplexDecimatingFir,
@@ -2938,6 +2947,385 @@ describe('v23-modem task 8: adaptive threshold', () => {
         },
       ),
       { numRuns: DEMOD_RUNS },
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 9: line simulator (requirement 11, design.md "Line simulator API")
+
+const CH_RUNS = isSlowTestsEnabled() ? 60 : 10;
+const PAGE_BYTES = Uint8Array.from(ascii('3615 NEOMINITEL'));
+
+function mustChannel(p: ChannelParams): LineChannel {
+  const r = createChannel(p);
+  if (!r.ok) throw new Error(JSON.stringify(r.error));
+  return r.value;
+}
+
+function mustApply(x: Float32Array, p: ChannelParams): Float32Array {
+  const r = applyChannel(x, p);
+  if (!r.ok) throw new Error(JSON.stringify(r.error));
+  return r.value;
+}
+
+function concatF32(parts: readonly Float32Array[]): Float32Array {
+  const out = new Float32Array(parts.reduce((s, p) => s + p.length, 0));
+  let pos = 0;
+  for (const p of parts) {
+    out.set(p, pos);
+    pos += p.length;
+  }
+  return out;
+}
+
+/** Byte-identical comparison of two Float32Arrays. */
+function sameBytes(a: Float32Array, b: Float32Array): boolean {
+  return Buffer.from(a.buffer, a.byteOffset, a.byteLength).equals(Buffer.from(b.buffer, b.byteOffset, b.byteLength));
+}
+
+/** Streams x through a fresh channel in chunks of the given lengths (remainder last), then flush. */
+function streamChannel(x: Float32Array, p: ChannelParams, chunkLens: readonly number[] = []): Float32Array {
+  const ch = mustChannel(p);
+  const parts: Float32Array[] = [];
+  let pos = 0;
+  for (const len of chunkLens) {
+    if (pos >= x.length) break;
+    const end = Math.min(x.length, pos + len);
+    parts.push(ch.process(x.subarray(pos, end)));
+    pos = end;
+  }
+  parts.push(ch.process(x.subarray(pos)));
+  parts.push(ch.flush());
+  return concatF32(parts);
+}
+
+function pageAt(fs: number): Float32Array {
+  return mustModulate(PAGE_BYTES, { sampleRate: fs });
+}
+
+/** Hann-windowed tone amplitude at fHz over [from, to): A for a tone A sin(2 pi f t + phi). */
+function hannAmplitude(x: Float32Array, fs: number, fHz: number, from: number, to: number): number {
+  let re = 0;
+  let im = 0;
+  let ws = 0;
+  const n = to - from;
+  for (let i = 0; i < n; i++) {
+    const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1));
+    const a = (2 * Math.PI * fHz * (from + i)) / fs;
+    re += w * x[from + i] * Math.cos(a);
+    im -= w * x[from + i] * Math.sin(a);
+    ws += w;
+  }
+  return (2 * Math.hypot(re, im)) / ws;
+}
+
+function meanSquare(x: Float32Array): number {
+  let s = 0;
+  for (let i = 0; i < x.length; i++) s += x[i] * x[i];
+  return s / x.length;
+}
+
+describe('v23-modem task 9: line simulator', () => {
+  it('factory: bad-sample-rate, bad-option for each invalid parameter; never throws', () => {
+    for (const fs of [7999, 96001, NaN, Infinity]) {
+      expect(createChannel({ sampleRate: fs, seed: 1 })).toEqual({ ok: false, error: { kind: 'bad-sample-rate', sampleRate: fs } });
+    }
+    const ok = { sampleRate: 48000, seed: 1 };
+    const cases: [string, Record<string, unknown>][] = [
+      ['seed', { seed: -1 }],
+      ['seed', { seed: 1.5 }],
+      ['seed', { seed: 2 ** 32 }],
+      ['channel', { channel: 'up' }],
+      ['signalAmplitude', { signalAmplitude: 0 }],
+      ['signalAmplitude', { signalAmplitude: NaN }],
+      ['noise', { noise: 3 }],
+      ['noise', { noise: { kind: 'snr', db: 10 } }],
+      ['noise', { noise: { kind: 'ebN0', db: NaN } }],
+      ['offsetHz', { offsetHz: 24000 }],
+      ['offsetHz', { offsetHz: NaN }],
+      ['clockPpm', { clockPpm: 100001 }],
+      ['clockPpm', { clockPpm: -Infinity }],
+      ['hum', { hum: { levelDb: NaN } }],
+      ['hum', { hum: { levelDb: -20, harmonics: 0 } }],
+      ['hum', { hum: { levelDb: -20, harmonics: 2.5 } }],
+      ['hum', { hum: { levelDb: -20, harmonics: 21 } }],
+      ['hum', { hum: { levelDb: -20, fundamentalHz: 24000 } }],
+      ['bursts', { bursts: { ratePerS: -1, durationMs: [5, 25], levelDb: 0 } }],
+      ['bursts', { bursts: { ratePerS: 1, durationMs: [0, 25], levelDb: 0 } }],
+      ['bursts', { bursts: { ratePerS: 1, durationMs: [30, 25], levelDb: 0 } }],
+      ['bursts', { bursts: { ratePerS: 1, durationMs: [5], levelDb: 0 } }],
+      ['bursts', { bursts: { ratePerS: 1, durationMs: [5, 25], levelDb: NaN } }],
+    ];
+    for (const [option, extra] of cases) {
+      const r = createChannel({ ...ok, ...extra } as unknown as ChannelParams);
+      expect(r, `${option} ${JSON.stringify(extra)}`).toEqual({ ok: false, error: { kind: 'bad-option', option, reason: expect.any(String) } });
+    }
+    expect(createChannel({ sampleRate: 8000, seed: 0xffffffff }).ok).toBe(true);
+    const full: ChannelParams = {
+      ...ok,
+      channel: 'backward',
+      signalAmplitude: 0.3,
+      noise: { kind: 'snr3k', db: 20 },
+      offsetHz: -300,
+      clockPpm: -100000,
+      hum: DEFAULT_HUM,
+      bursts: DEFAULT_BURSTS,
+    };
+    expect(createChannel(full).ok).toBe(true);
+    expect(applyChannel([1, 2] as unknown as Float32Array, ok)).toEqual({ ok: false, error: { kind: 'bad-option', option: 'x', reason: expect.any(String) } });
+    expect(applyChannel(new Float32Array(0), ok)).toEqual({ ok: true, value: new Float32Array(0) });
+    expect(DEFAULT_HUM).toEqual({ levelDb: -20, fundamentalHz: 50, harmonics: 5 });
+    expect(DEFAULT_BURSTS).toEqual({ ratePerS: 0.5, durationMs: [5, 25], levelDb: 0 });
+  });
+
+  it('identity: with no impairment, applyChannel returns its input and the stream is the input delayed by the latency', () => {
+    for (const fs of STANDARD_SAMPLE_RATES) {
+      const x = pageAt(fs);
+      expect(sameBytes(mustApply(x, { sampleRate: fs, seed: 3 }), x), `fs=${fs}`).toBe(true);
+      const lat = channelLatencySamples(fs);
+      const ch = mustChannel({ sampleRate: fs, seed: 3 });
+      const a = ch.process(x.subarray(0, 1000));
+      const b = ch.process(x.subarray(1000));
+      const tail = ch.flush();
+      expect([a.length, b.length, tail.length]).toEqual([1000, x.length - 1000, lat]);
+      const all = concatF32([a, b, tail]);
+      expect(all.subarray(0, lat).every((v) => v === 0)).toBe(true);
+      expect(sameBytes(all.subarray(lat), x), `fs=${fs}`).toBe(true);
+    }
+  });
+
+  it('9.2 determinism: same parameters and seed give byte-identical output, whatever the chunk boundaries', () => {
+    const arbOptional = <T>(a: fc.Arbitrary<T>) => fc.option(a, { nil: undefined });
+    const arbCase = fc.record({
+      fs: fc.constantFrom(8000, 22050, 44100, 48000),
+      seed: fc.integer({ min: 0, max: 0xffffffff }),
+      noise: arbOptional(
+        fc.record({ kind: fc.constantFrom<'ebN0' | 'snr3k'>('ebN0', 'snr3k'), db: fc.double({ min: 0, max: 30, noNaN: true }) }),
+      ),
+      offsetHz: arbOptional(fc.double({ min: -400, max: 400, noNaN: true })),
+      clockPpm: arbOptional(fc.double({ min: -30000, max: 30000, noNaN: true })),
+      hum: arbOptional(fc.record({ levelDb: fc.double({ min: -30, max: 0, noNaN: true }), harmonics: fc.integer({ min: 1, max: 7 }) })),
+      bursts: arbOptional(fc.constant({ ratePerS: 20, durationMs: [2, 10] as [number, number], levelDb: 0 })),
+    });
+    fc.assert(
+      fc.property(arbCase, arbBytes7(1, 4), fc.array(fc.integer({ min: 0, max: 3000 }), { maxLength: 12 }), (q, bytes, lens) => {
+        const x = mustModulate(bytes, { sampleRate: q.fs });
+        const p: ChannelParams = {
+          sampleRate: q.fs,
+          seed: q.seed,
+          noise: q.noise as ChannelParams['noise'],
+          offsetHz: q.offsetHz,
+          clockPpm: q.clockPpm,
+          hum: q.hum,
+          bursts: q.bursts,
+        };
+        const once = mustApply(x, p);
+        expect(sameBytes(mustApply(x, p), once)).toBe(true);
+        const whole = streamChannel(x, p);
+        expect(sameBytes(streamChannel(x, p, [0, 1, ...lens]), whole)).toBe(true);
+        // applyChannel is the stream without its latency.
+        expect(sameBytes(whole.subarray(channelLatencySamples(q.fs)), once)).toBe(true);
+      }),
+      { numRuns: CH_RUNS },
+    );
+    // Another seed gives other noise.
+    const x = pageAt(8000);
+    const noisy = (seed: number) => mustApply(x, { sampleRate: 8000, seed, noise: { kind: 'ebN0', db: 10 } });
+    expect(sameBytes(noisy(1), noisy(2))).toBe(false);
+  });
+
+  it('AWGN (A7): the noise-only channel equals the awgn helper for the same seed; ebN0 and snr3k follow R5; variance follows R1', () => {
+    for (const fs of [8000, 48000]) {
+      const x = pageAt(fs);
+      const seed = 21;
+      const viaEb = mustApply(x, { sampleRate: fs, seed, noise: { kind: 'ebN0', db: 12 } });
+      expect(sameBytes(viaEb, awgn(x, { sampleRate: fs, ebN0Db: 12, signalAmplitude: 0.5, seed }))).toBe(true);
+      const via3k = mustApply(x, { sampleRate: fs, seed, noise: { kind: 'snr3k', db: 20 } });
+      expect(sameBytes(via3k, awgn(x, { sampleRate: fs, snrDb: 20, bandwidthHz: 3000, signalAmplitude: 0.5, seed }))).toBe(true);
+      // R5: Eb/N0 = γ_3k + 10 log10(3000 / 1200).
+      const viaR5 = mustApply(x, { sampleRate: fs, seed, noise: { kind: 'ebN0', db: 20 + 10 * Math.log10(3000 / 1200) } });
+      let maxDiff = 0;
+      for (let i = 0; i < x.length; i++) maxDiff = Math.max(maxDiff, Math.abs(viaR5[i] - via3k[i]));
+      expect(maxDiff).toBeLessThanOrEqual(1e-6);
+    }
+    // R1 on silence: sigma^2 = A^2 fs / (4 R 10^(Eb/N0 / 10)), with R the bit rate of the channel.
+    for (const [channel, baud] of [
+      ['forward', 1200],
+      ['backward', 75],
+    ] as const) {
+      const fs = 16000;
+      const amp = 0.3;
+      const y = mustApply(new Float32Array(400000), { sampleRate: fs, seed: 5, channel, signalAmplitude: amp, noise: { kind: 'ebN0', db: 10 } });
+      const s2 = (amp * amp * fs) / (4 * baud * 10);
+      expect(Math.abs(meanSquare(y) / s2 - 1), channel).toBeLessThanOrEqual(0.01);
+    }
+  });
+
+  it('frequency offset (SSB): a tone moves by offsetHz; the image and the original are at least 40 dB down', () => {
+    const amp = 0.5;
+    for (const fs of [8000, 44100, 48000]) {
+      for (const f of [FWD.markHz, FWD.spaceHz]) {
+        for (const off of [-400, -37.5, 120, 400]) {
+          const x = toneMs(fs, f, 300, amp);
+          const y = mustApply(x, { sampleRate: fs, seed: 1, offsetHz: off });
+          expect(y.length).toBe(x.length);
+          const from = Math.round(0.03 * fs);
+          const to = y.length - from;
+          const tag = `fs=${fs} f=${f} off=${off}`;
+          expect(Math.abs(hannAmplitude(y, fs, f + off, from, to) / amp - 1), tag).toBeLessThanOrEqual(0.01);
+          expect(hannAmplitude(y, fs, f - off, from, to) / amp, tag).toBeLessThanOrEqual(0.01);
+          expect(hannAmplitude(y, fs, f, from, to) / amp, tag).toBeLessThanOrEqual(0.01);
+        }
+      }
+    }
+  });
+
+  it('clock offset: the output lasts N / (1 + eps), tones are scaled by (1 + eps), and a page still decodes', () => {
+    const amp = 0.5;
+    for (const fs of [8000, 48000]) {
+      for (const ppm of [-20000, 20000]) {
+        const step = 1 + ppm * 1e-6;
+        const x = toneMs(fs, FWD.markHz, 300, amp);
+        const y = mustApply(x, { sampleRate: fs, seed: 1, clockPpm: ppm });
+        let expectedLength = 0;
+        while (expectedLength * step <= x.length - 1) expectedLength++;
+        const tag = `fs=${fs} ppm=${ppm}`;
+        expect(y.length, tag).toBe(expectedLength);
+        const from = Math.round(0.03 * fs);
+        const to = y.length - from;
+        expect(Math.abs(hannAmplitude(y, fs, FWD.markHz * step, from, to) / amp - 1), tag).toBeLessThanOrEqual(0.01);
+        expect(hannAmplitude(y, fs, FWD.markHz, from, to) / amp, tag).toBeLessThanOrEqual(0.01);
+        const z = mustApply(pageAt(fs), { sampleRate: fs, seed: 2, clockPpm: ppm });
+        expect(charsOf(demodWith(z, fs, undefined)).map((c) => c.value), tag).toEqual(Array.from(PAGE_BYTES));
+      }
+    }
+  });
+
+  it('hum: total power P 10^(levelDb / 10), harmonics k f0 with amplitudes c / k; a page under 0 dB hum still decodes', () => {
+    const pSignal = 0.125; // A = 0.5
+    for (const fs of [8000, 48000]) {
+      const y = mustApply(new Float32Array(fs), { sampleRate: fs, seed: 1, hum: DEFAULT_HUM });
+      const pHum = pSignal * 10 ** (-20 / 10);
+      expect(Math.abs(meanSquare(y) / pHum - 1), `fs=${fs}`).toBeLessThanOrEqual(0.005);
+      let s = 0;
+      for (let k = 1; k <= 5; k++) s += 1 / (k * k);
+      const c = Math.sqrt((2 * pHum) / s);
+      for (let k = 1; k <= 5; k++) {
+        // One second: every harmonic falls on a DFT bin.
+        const mag = (2 * toneMagnitude(y, fs, 50 * k, 0, fs)) / fs;
+        expect(Math.abs(mag / (c / k) - 1), `fs=${fs} k=${k}`).toBeLessThanOrEqual(0.005);
+      }
+    }
+    const fs = 44100;
+    const z = mustApply(pageAt(fs), { sampleRate: fs, seed: 3, hum: { levelDb: 0 } });
+    for (const mode of ['fixed', 'adaptive'] as const) {
+      expect(charsOf(demodWith(z, fs, mode)).map((ch) => ch.value), mode).toEqual(Array.from(PAGE_BYTES));
+    }
+  });
+
+  it('bursts: Poisson arrivals with durations in range and the requested 3 kHz level; the AWGN stream is unchanged outside bursts', () => {
+    const fs = 8000;
+    const seconds = 60;
+    const rate = 2;
+    const levelDb = -3;
+    const zeros = new Float32Array(seconds * fs);
+    const bursts = { ratePerS: rate, durationMs: [5, 25] as [number, number], levelDb };
+    const b = mustApply(zeros, { sampleRate: fs, seed: 9, bursts });
+    const segs: [number, number][] = [];
+    for (let i = 0; i < b.length; ) {
+      if (b[i] === 0) {
+        i++;
+        continue;
+      }
+      const start = i;
+      while (i < b.length && b[i] !== 0) i++;
+      segs.push([start, i]);
+    }
+    // Poisson count, mean 120: accept 4 standard deviations.
+    expect(segs.length).toBeGreaterThanOrEqual(76);
+    expect(segs.length).toBeLessThanOrEqual(164);
+    let energy = 0;
+    let samples = 0;
+    for (const [s0, s1] of segs) {
+      expect(s1 - s0).toBeGreaterThanOrEqual(Math.round(0.005 * fs));
+      expect(s1 - s0).toBeLessThanOrEqual(Math.round(0.025 * fs));
+      for (let i = s0; i < s1; i++) energy += b[i] * b[i];
+      samples += s1 - s0;
+    }
+    // sigma_b^2 = P 10^(levelDb / 10) / 3000 * fs / 2.
+    const s2 = ((0.125 * 10 ** (levelDb / 10)) / 3000) * (fs / 2);
+    expect(Math.abs(energy / samples / s2 - 1)).toBeLessThanOrEqual(0.05);
+    const noise = { kind: 'snr3k', db: 10 } as const;
+    const n = mustApply(zeros, { sampleRate: fs, seed: 9, noise });
+    const both = mustApply(zeros, { sampleRate: fs, seed: 9, noise, bursts });
+    let outside = true;
+    let maxInside = 0;
+    let k = 0;
+    for (let i = 0; i < both.length; i++) {
+      while (k < segs.length && segs[k][1] <= i) k++;
+      const inBurst = k < segs.length && segs[k][0] <= i;
+      if (inBurst) maxInside = Math.max(maxInside, Math.abs(both[i] - (n[i] + b[i])));
+      else if (both[i] !== n[i]) outside = false;
+    }
+    expect(outside).toBe(true);
+    expect(maxInside).toBeLessThanOrEqual(1e-6);
+  });
+
+  it('setParams: from the next sample; undefined switches an impairment off; unchanged or invalid updates change nothing; flush and reset restart', () => {
+    const fs = 16000;
+    const x = pageAt(fs);
+    const lat = channelLatencySamples(fs);
+    const cut = 3000;
+    const p: ChannelParams = { sampleRate: fs, seed: 4, noise: { kind: 'ebN0', db: 10 }, hum: DEFAULT_HUM, bursts: DEFAULT_BURSTS };
+    // Update shaped like src/workers/modem-bridge.ts: every key present, undefined when switched off.
+    const ch = mustChannel(p);
+    ch.process(x.subarray(0, cut));
+    ch.setParams({ channel: 'forward', signalAmplitude: 0.5, noise: undefined, offsetHz: 0, clockPpm: 0, hum: undefined, bursts: undefined });
+    expect(sameBytes(ch.process(x.subarray(cut)), x.subarray(cut - lat, x.length - lat))).toBe(true);
+
+    // Re-sending the same values (the bridge does it on every slider move) and invalid updates.
+    const q: ChannelParams = { ...p, offsetHz: 150, clockPpm: 3000 };
+    const ref = streamChannel(x, q, [cut]);
+    const c2 = mustChannel(q);
+    const parts = [c2.process(x.subarray(0, cut))];
+    c2.setParams({ noise: { kind: 'ebN0', db: 10 }, hum: { ...DEFAULT_HUM }, bursts: { ...DEFAULT_BURSTS, durationMs: [5, 25] }, offsetHz: 150, clockPpm: 3000 });
+    c2.setParams({ offsetHz: NaN });
+    c2.setParams({ noise: { kind: 'ebN0', db: 30 }, clockPpm: 1e9 }); // invalid as a whole
+    c2.setParams(null as unknown as Partial<ChannelParams>);
+    parts.push(c2.process(x.subarray(cut)), c2.flush());
+    expect(sameBytes(concatF32(parts), ref)).toBe(true);
+
+    // flush and reset bring back the initial state, with the current parameters.
+    const fresh = streamChannel(x, q);
+    const c3 = mustChannel(q);
+    c3.process(x.subarray(0, 5000));
+    c3.reset();
+    expect(sameBytes(concatF32([c3.process(x), c3.flush()]), fresh)).toBe(true);
+    expect(sameBytes(concatF32([c3.process(x), c3.flush()]), fresh)).toBe(true);
+
+    // A live offset starts at phase 0 on the next output sample, then rotates.
+    const c4 = mustChannel({ sampleRate: fs, seed: 4 });
+    c4.process(x.subarray(0, cut));
+    c4.setParams({ offsetHz: 200 });
+    const after = c4.process(x.subarray(cut));
+    expect(after[0]).toBe(x[cut - lat]);
+    expect(sameBytes(after, x.subarray(cut - lat, x.length - lat))).toBe(false);
+  });
+
+  it('end to end: a page through clock offset, frequency offset, hum and 20 dB noise decodes in adaptive mode', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(8000, 44100, 48000),
+        fc.integer({ min: 0, max: 0xffffffff }),
+        fc.double({ min: -300, max: 300, noNaN: true }),
+        fc.double({ min: -10000, max: 10000, noNaN: true }),
+        (fs, seed, off, ppm) => {
+          const z = mustApply(pageAt(fs), { sampleRate: fs, seed, offsetHz: off, clockPpm: ppm, hum: DEFAULT_HUM, noise: { kind: 'snr3k', db: 20 } });
+          expect(charsOf(demodWith(z, fs, 'adaptive')).map((c) => c.value)).toEqual(Array.from(PAGE_BYTES));
+        },
+      ),
+      { numRuns: CH_RUNS },
     );
   });
 });

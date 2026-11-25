@@ -50,9 +50,9 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - [x] 8.2 Property test M7. Non-regression test: the fixed-threshold path is unchanged after task 8. From this task, `threshold` defaults to `'adaptive'`.
   - _Requirements: 7.1-7.4_
 
-- [ ] 9. Line simulator `[MVP]`
-  - [ ] 9.1 AWGN by Eb/N0 or SNR, SSB frequency offset (Hilbert transform), clock offset (resample), 50 Hz hum, bursts.
-  - [ ] 9.2 Determinism test (same seed → identical output).
+- [x] 9. Line simulator `[MVP]`
+  - [x] 9.1 AWGN by Eb/N0 or SNR, SSB frequency offset (Hilbert transform), clock offset (resample), 50 Hz hum, bursts.
+  - [x] 9.2 Determinism test (same seed → identical output).
   - _Requirements: 11.1-11.3_
 
 - [ ] 10. Quality and BER `[MVP]`
