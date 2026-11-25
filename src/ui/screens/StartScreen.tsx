@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactElement } from 'react';
+import { CHANNELS } from '../../modem';
 
 export interface StartScreenProps {
   onConnect: () => void;
@@ -21,7 +22,7 @@ export function StartScreen({ onConnect }: StartScreenProps): ReactElement {
         30 juin 2012 : la France débranche le Minitel.
       </p>
       <p className="nm-start-caption">
-        Ici, chaque page voyage à nouveau par le son d&apos;un vrai modem V.23 à 1200 bauds.
+        Ici, chaque page voyage à nouveau par le son d&apos;un vrai modem V.23 à {CHANNELS.forward.baud} bauds.
       </p>
       <div className="nm-start-actions">
         <button

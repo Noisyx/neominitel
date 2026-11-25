@@ -6,6 +6,7 @@ import {
   type PageSource,
   type Screen,
 } from '../../videotex';
+import { CHANNELS } from '../../modem';
 
 /**
  * Subtle Videotex standby frame shown behind the start overlay before connection.
@@ -33,7 +34,7 @@ export const STANDBY_PAGE_SOURCE: PageSource = {
  */
 export const SOMMAIRE_PREVIEW_PAGE_SOURCE: PageSource = {
   id: 'sommaire/accueil',
-  status: '3615 SOMMAIRE             1200/75 V.23',
+  status: `3615 SOMMAIRE             ${CHANNELS.forward.baud}/${CHANNELS.backward.baud} V.23`,
   mosaics: [
     {
       row: 2,
@@ -117,7 +118,10 @@ export const SOMMAIRE_PREVIEW_PAGE_SOURCE: PageSource = {
       row: 23,
       col: 2,
       segments: [
-        { text: 'Modem V.23 : 1300 Hz (1) / 2100 Hz (0)', fg: COLOURS.GREEN },
+        {
+          text: `Modem V.23 : ${CHANNELS.forward.markHz} Hz (1) / ${CHANNELS.forward.spaceHz} Hz (0)`,
+          fg: COLOURS.GREEN,
+        },
       ],
     },
   ],
