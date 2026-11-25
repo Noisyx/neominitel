@@ -648,12 +648,20 @@ export function encodePage(
     }
   }
 
-  if (p.status !== undefined) {
-    if (row24Wrapped) {
-      // Keep cursor on row 24 before emitting row 0 so a corrupted US on row 0 stays adjacent
-      out.push(C0.VT);
-    }
-    emitRow(out, STATUS_ROW, screen.rows[STATUS_ROW], useRep);
+  if (row24Wrapped) {
+    // Keep cursor on row 24 before emitting row 0 so a corrupted US on row 0 stays adjacent
+    out.push(C0.VT);
+  }
+  const statusRes = emitRow(out, STATUS_ROW, screen.rows[STATUS_ROW], useRep);
+  if (!statusRes.endedAtLastCol) {
+    // FF only clears rows 1..24; CAN clears any leftover status characters on row 0
+    out.push(
+      C0.ESC,
+      ESC_CODES.FG_WHITE,
+      C0.ESC,
+      ESC_CODES.BG_BLACK,
+      C0.CAN,
+    );
   }
 
   return {
