@@ -37,8 +37,8 @@ import {
   writeWav,
   type WavErrorReason,
 } from '../../src/modem/wav';
-import { readWav as readWavPublic, writeWav as writeWavPublic, type ModulateOptions } from '../../src/modem';
-import { DISCRIMINATOR } from '../../src/modem/v23';
+import { readWav as readWavPublic, writeWav as writeWavPublic, type DemodEvent, type ModulateOptions } from '../../src/modem';
+import { CARRIER, DISCRIMINATOR } from '../../src/modem/v23';
 import {
   ComplexDecimatingFir,
   designLowpass,
@@ -47,7 +47,19 @@ import {
   noiseBandwidthHz,
 } from '../../src/modem/filters';
 import { createDiscriminator, mixerPhaseCycles, type Discriminator } from '../../src/modem/discriminator';
-import { STANDARD_SAMPLE_RATES, arbBytes7, arbStandardSampleRate, isSlowTestsEnabled } from '../helpers';
+import { carrierLevelDbfs, createDetector } from '../../src/modem/carrier';
+import { createDemodulator } from '../../src/modem/demodulator';
+import { fixedThresholdHz, softValue } from '../../src/modem/threshold';
+import { createUart, type Uart, type UartChar } from '../../src/modem/uart';
+import {
+  STANDARD_SAMPLE_RATES,
+  arbBytes7,
+  arbStandardSampleRate,
+  awgn,
+  createRng,
+  isSlowTestsEnabled,
+  resample,
+} from '../helpers';
 
 const NUM_RUNS = isSlowTestsEnabled() ? 2000 : 200;
 const SIGNAL_RUNS = isSlowTestsEnabled() ? 300 : 30;
@@ -1845,5 +1857,830 @@ describe('v23-modem task 5.2 and 5.3: discriminator', () => {
     const silence = runDisc(makeDisc(fs), new Float32Array(n));
     expect(silence.f.every((f) => f === FWD.mixHz)).toBe(true);
     expect(silence.re.every((v) => v === 0) && silence.im.every((v) => v === 0)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 6: UART with the fixed threshold. Signals come from modulate() or from the independent
+// closed-form FSK generators below (used for clock offsets and sub-bit pulses).
+
+const UART_RUNS = isSlowTestsEnabled() ? 100 : 15;
+const M8_SNR_3K_DB = 20; // requirement 6.6 / property M8, SNR in the one-sided 3 kHz band (A7)
+const STANDARD_AND_NON_INTEGER: readonly number[] = ALL_TEST_RATES;
+const arbUartRate = fc.oneof(arbStandardSampleRate(), fc.constantFrom(...NON_INTEGER_RATES));
+
+interface Decoded {
+  chars: UartChar[];
+  uart: Uart;
+}
+
+/** Discriminator + UART on x, pushed in chunks of the given lengths (remainder last). */
+function decodeChars(x: Float32Array, fs: number, chunkLens: readonly number[] = []): Decoded {
+  const d = makeDisc(fs);
+  const uart = createUart(d);
+  const chars: UartChar[] = [];
+  const push = (c: Float32Array): void => {
+    for (const ch of uart.push(d.push(c))) chars.push(ch);
+  };
+  let pos = 0;
+  for (const len of chunkLens) {
+    if (pos >= x.length) break;
+    const end = Math.min(x.length, pos + len);
+    push(x.subarray(pos, end));
+    pos = end;
+  }
+  push(x.subarray(pos));
+  return { chars, uart };
+}
+
+/** Line bits of bytes with `idle` mark bits between frames (built from frame.ts, not modulate). */
+function lineBitsOf(bytes: Uint8Array, idle: number): Uint8Array {
+  const bitsPerFrame = FRAME.bitsPerFrame;
+  const out = new Uint8Array(bytes.length === 0 ? 0 : bytes.length * (bitsPerFrame + idle) - idle);
+  out.fill(1);
+  bytes.forEach((b, j) => byteToLineBits(b, out, j * (bitsPerFrame + idle)));
+  return out;
+}
+
+/**
+ * Independent phase-continuous FSK: line bit k covers [lead + k Tp, lead + (k + 1) Tp) seconds with
+ * Tp = 1 / (baud (1 + eps)) (transmitter clock fast by eps), nominal tones, mark before and after.
+ * Phase in closed form: c(t) = markHz t + (spaceHz - markHz) S(t), S = time spent at space.
+ */
+function fskClock(bits: Uint8Array, fs: number, o: { leadS: number; tailS: number; eps: number; amp: number }): Float32Array {
+  const tp = 1 / (FWD.baud * (1 + o.eps));
+  const cum = new Float64Array(bits.length + 1);
+  for (let k = 0; k < bits.length; k++) cum[k + 1] = cum[k] + (bits[k] === 0 ? tp : 0);
+  const end = o.leadS + bits.length * tp;
+  const n = Math.round(fs * (end + o.tailS));
+  const df = FWD.spaceHz - FWD.markHz;
+  return synth(n, o.amp, (i) => {
+    const t = i / fs;
+    let sp: number;
+    if (t < o.leadS) sp = 0;
+    else if (t >= end) sp = cum[bits.length];
+    else {
+      const k = Math.min(bits.length - 1, Math.floor((t - o.leadS) / tp));
+      sp = cum[k] + (bits[k] === 0 ? t - (o.leadS + k * tp) : 0);
+    }
+    return FWD.markHz * t + df * sp;
+  });
+}
+
+/** Phase-continuous sequence of constant tones [frequency Hz, duration s]. */
+function toneSegments(fs: number, segs: readonly [number, number][], amp: number): { x: Float32Array; startsS: number[] } {
+  const startsS: number[] = [];
+  let t = 0;
+  for (const [, dur] of segs) {
+    startsS.push(t);
+    t += dur;
+  }
+  const n = Math.round(fs * t);
+  const x = synth(n, amp, (i) => {
+    const ti = i / fs;
+    let c = 0;
+    for (let k = 0; k < segs.length; k++) {
+      const [f, dur] = segs[k];
+      const span = Math.min(Math.max(ti - startsS[k], 0), dur);
+      c += f * span;
+    }
+    return c;
+  });
+  return { x, startsS };
+}
+
+/** Segments [Hz, s] of one frame, as whole bits at the nominal rate. */
+function frameSegments(byte: number): [number, number][] {
+  return Array.from(byteToLineBits(byte), (b) => [b === 1 ? FWD.markHz : FWD.spaceHz, 1 / FWD.baud] as [number, number]);
+}
+
+/** Expected start-edge times (input samples) of the frames of modulate(bytes, ...). */
+function frameStarts(n: number, fs: number, leadMs: number, idle: number): number[] {
+  return Array.from({ length: n }, (_, j) => (leadMs / 1000 + (j * (FRAME.bitsPerFrame + idle)) / FWD.baud) * fs);
+}
+
+/**
+ * Tolerance used only to match a received char to the frame it belongs to (0.1 T). It is not the
+ * atSample precision requirement, which is tested separately (T6-6).
+ */
+function matchTol(fs: number): number {
+  return (0.1 * fs) / FWD.baud;
+}
+
+function charsAreExact(chars: UartChar[], bytes: Uint8Array): boolean {
+  return (
+    chars.length === bytes.length &&
+    chars.every((c, j) => c.value === bytes[j] && c.parityOk && c.framingOk)
+  );
+}
+
+describe('v23-modem task 6.1: soft value and fixed threshold', () => {
+  it('fixed threshold 1700 Hz; s = -1 at mark, +1 at space, 0 at the threshold (forward)', () => {
+    expect(fixedThresholdHz(FWD)).toBe(FWD.thresholdHz);
+    expect(softValue(FWD.markHz, FWD.thresholdHz, FWD)).toBe(-1);
+    expect(softValue(FWD.spaceHz, FWD.thresholdHz, FWD)).toBe(1);
+    expect(softValue(FWD.thresholdHz, FWD.thresholdHz, FWD)).toBe(0);
+  });
+});
+
+describe('v23-modem task 6.2 and 6.3: UART', () => {
+  it('M1 round-trip: demodulate(modulate(b)) returns b, all parityOk and framingOk (fixed threshold, clean, 8 rates, 0-500 bytes)', () => {
+    fc.assert(
+      fc.property(arbStandardSampleRate(), arbBytes7(0, 500), (fs, bytes) => {
+        const m = modulate(bytes, { sampleRate: fs });
+        expect(m.ok).toBe(true);
+        if (!m.ok) return;
+        const { chars } = decodeChars(m.value, fs);
+        expect(chars.map((c) => c.value)).toEqual(Array.from(bytes));
+        expect(chars.every((c) => c.parityOk && c.framingOk)).toBe(true);
+      }),
+      { numRuns: UART_RUNS },
+    );
+    // The longest case of the property at every rate, deterministic.
+    const rng = createRng(2026);
+    const longest = Uint8Array.from({ length: 500 }, () => Math.floor(rng.nextFloat() * 128));
+    for (const fs of STANDARD_SAMPLE_RATES) {
+      const m = modulate(longest, { sampleRate: fs });
+      if (!m.ok) throw new Error('modulate');
+      expect(charsAreExact(decodeChars(m.value, fs).chars, longest), `fs=${fs}`).toBe(true);
+    }
+  });
+
+  it('round trip also holds with inter-frame idle bits and non-integer rates; atSample within 1 decimated estimate (D input samples) of the true edge (requirement 6.1, T6-6)', () => {
+    // Error of atSample in units of the UART grid (D input samples), worst per rate.
+    const worstByRate = new Map<number, { samples: number; ratio: number }>();
+    const record = (fs: number, e: number): void => {
+      const D = makeDisc(fs).decimation;
+      const prev = worstByRate.get(fs);
+      if (!prev || e > prev.samples) worstByRate.set(fs, { samples: e, ratio: e / D });
+    };
+    // Deterministic: 300 random bytes at every standard and non-integer rate, collated frames.
+    const rng = createRng(17);
+    const bytes300 = Uint8Array.from({ length: 300 }, () => Math.floor(rng.nextFloat() * 128));
+    for (const fs of STANDARD_AND_NON_INTEGER) {
+      const m = modulate(bytes300, { sampleRate: fs });
+      if (!m.ok) throw new Error('modulate');
+      const { chars } = decodeChars(m.value, fs);
+      expect(charsAreExact(chars, bytes300), `fs=${fs}`).toBe(true);
+      const starts = frameStarts(bytes300.length, fs, MODULATE_DEFAULTS.leadIdleMs, 0);
+      chars.forEach((c, j) => record(fs, Math.abs(c.atSample - starts[j])));
+    }
+    // Property: inter-frame idle bits 0..3.
+    fc.assert(
+      fc.property(arbUartRate, arbBytes7(1, 40), fc.integer({ min: 0, max: 3 }), (fs, bytes, idle) => {
+        const m = modulate(bytes, { sampleRate: fs, interFrameIdleBits: idle });
+        if (!m.ok) throw new Error('modulate');
+        const { chars } = decodeChars(m.value, fs);
+        expect(charsAreExact(chars, bytes)).toBe(true);
+        const starts = frameStarts(bytes.length, fs, MODULATE_DEFAULTS.leadIdleMs, idle);
+        chars.forEach((c, j) => record(fs, Math.abs(c.atSample - starts[j])));
+      }),
+      { numRuns: UART_RUNS },
+    );
+    const rows = [...worstByRate.entries()].sort((a, b) => a[0] - b[0]);
+    console.log(
+      'UART atSample |error| vs true start edge (clean), worst per rate: ' +
+        rows
+          .map(([fs, w]) => `${fs}: ${w.samples.toFixed(3)} samples = ${w.ratio.toFixed(3)} D = ${((w.samples * FWD.baud) / fs).toFixed(4)} T`)
+          .join(', '),
+    );
+    for (const [fs, w] of rows) expect(w.ratio, `fs=${fs}`).toBeLessThanOrEqual(1);
+  });
+
+  it('minConfidence = min |mean s| over the 10 windows, start bit included (T6-5): close to 1 on a clean signal', () => {
+    let worst = Infinity;
+    for (const fs of STANDARD_AND_NON_INTEGER) {
+      // 0x55 alternates every bit (worst case for the windows), 0x00 and 0x7F give long runs.
+      const bytes = Uint8Array.from([0x55, 0x2a, 0x00, 0x7f, 0x41]);
+      const m = modulate(bytes, { sampleRate: fs });
+      if (!m.ok) throw new Error('modulate');
+      const { chars } = decodeChars(m.value, fs);
+      expect(charsAreExact(chars, bytes), `fs=${fs}`).toBe(true);
+      for (const c of chars) {
+        expect(c.minConfidence).toBeLessThanOrEqual(1.2);
+        worst = Math.min(worst, c.minConfidence);
+      }
+    }
+    console.log(`UART minConfidence on clean signals: worst ${worst.toFixed(4)}`);
+    expect(worst).toBeGreaterThanOrEqual(0.75);
+  });
+
+  it('chunk invariance: any partition of the input gives identical chars', () => {
+    fc.assert(
+      fc.property(
+        arbUartRate,
+        arbBytes7(0, 12),
+        fc.integer({ min: 0, max: 2 }),
+        fc.array(fc.integer({ min: 0, max: 400 }), { maxLength: 60 }),
+        (fs, bytes, idle, lens) => {
+          const m = modulate(bytes, { sampleRate: fs, interFrameIdleBits: idle });
+          if (!m.ok) throw new Error('modulate');
+          const whole = decodeChars(m.value, fs).chars;
+          expect(decodeChars(m.value, fs, lens).chars).toEqual(whole);
+        },
+      ),
+      { numRuns: UART_RUNS },
+    );
+  });
+
+  it('M4 parity (detection half): inverting any line bit 1..8 of a frame gives parityOk = false for that frame only', () => {
+    fc.assert(
+      fc.property(
+        arbUartRate,
+        arbBytes7(1, 20),
+        fc.nat(),
+        fc.integer({ min: FIRST_DATA_BIT_INDEX, max: PARITY_BIT_INDEX }),
+        fc.integer({ min: 0, max: 2 }),
+        (fs, bytes, jRaw, b, idle) => {
+          const j = jRaw % bytes.length;
+          const m = modulate(bytes, { sampleRate: fs, interFrameIdleBits: idle, bitErrors: [j * (FRAME.bitsPerFrame + idle) + b] });
+          if (!m.ok) throw new Error('modulate');
+          const { chars } = decodeChars(m.value, fs);
+          expect(chars.length).toBe(bytes.length);
+          chars.forEach((c, i) => {
+            const expectedValue = i === j && b < PARITY_BIT_INDEX ? bytes[i] ^ (1 << (b - FIRST_DATA_BIT_INDEX)) : bytes[i];
+            expect(c.value).toBe(expectedValue);
+            expect(c.parityOk).toBe(i !== j);
+            expect(c.framingOk).toBe(true);
+          });
+        },
+      ),
+      { numRuns: UART_RUNS },
+    );
+  });
+
+  it('characterization: inverting the start bit loses that frame; with 10 idle bits the next frames are intact', () => {
+    let garbage = 0;
+    fc.assert(
+      fc.property(arbUartRate, arbBytes7(2, 8), fc.nat(), (fs, bytes, jRaw) => {
+        const idle = 10;
+        const j = jRaw % bytes.length;
+        const m = modulate(bytes, { sampleRate: fs, interFrameIdleBits: idle, bitErrors: [j * (FRAME.bitsPerFrame + idle)] });
+        if (!m.ok) throw new Error('modulate');
+        const { chars } = decodeChars(m.value, fs);
+        const starts = frameStarts(bytes.length, fs, MODULATE_DEFAULTS.leadIdleMs, idle);
+        const frameSpan = (FRAME.bitsPerFrame + idle) * (fs / FWD.baud);
+        const matched = new Set<number>();
+        for (const c of chars) {
+          const i = starts.findIndex((t) => Math.abs(c.atSample - t) <= matchTol(fs));
+          if (i >= 0 && i !== j) {
+            expect(c.value).toBe(bytes[i]);
+            expect(c.parityOk && c.framingOk).toBe(true);
+            matched.add(i);
+          } else {
+            // Anything else is decoded from frame j's own bits, after its (missing) start edge.
+            expect(c.atSample).toBeGreaterThan(starts[j] + matchTol(fs));
+            expect(c.atSample).toBeLessThan(starts[j] + frameSpan - matchTol(fs));
+            garbage++;
+          }
+        }
+        expect(matched.size).toBe(bytes.length - 1);
+      }),
+      { numRuns: UART_RUNS },
+    );
+    console.log(`start-bit inversion: ${garbage} misaligned chars decoded inside the damaged frames`);
+  });
+
+  it('characterization: inverting the stop bit gives framingOk = false (requirement 6.5); with 2 idle bits the search resumes and the next frames are intact', () => {
+    let lostAfter = 0;
+    let cases0 = 0;
+    fc.assert(
+      fc.property(arbUartRate, arbBytes7(2, 10), fc.nat(), fc.constantFrom(0, 2), (fs, bytes, jRaw, idle) => {
+        const j = jRaw % bytes.length;
+        const m = modulate(bytes, {
+          sampleRate: fs,
+          interFrameIdleBits: idle,
+          bitErrors: [j * (FRAME.bitsPerFrame + idle) + STOP_BIT_INDEX],
+        });
+        if (!m.ok) throw new Error('modulate');
+        const { chars } = decodeChars(m.value, fs);
+        const starts = frameStarts(bytes.length, fs, MODULATE_DEFAULTS.leadIdleMs, idle);
+        for (let i = 0; i <= j; i++) {
+          expect(Math.abs(chars[i].atSample - starts[i])).toBeLessThanOrEqual(matchTol(fs));
+          expect(chars[i].value).toBe(bytes[i]);
+          expect(chars[i].parityOk).toBe(true);
+          expect(chars[i].framingOk).toBe(i !== j);
+        }
+        if (idle === 2) {
+          expect(charsAreExact(chars.slice(j + 1), bytes.slice(j + 1))).toBe(true);
+        } else {
+          // Collated frames: the next start bit follows a space stop bit, so it has no mark before
+          // it and that frame may be lost (design.md M4). Characterised, not required.
+          cases0++;
+          const exactAfter = chars.filter((c) =>
+            starts.some((t, i) => i > j && Math.abs(c.atSample - t) <= matchTol(fs) && c.value === bytes[i]),
+          );
+          lostAfter += bytes.length - 1 - j - exactAfter.length;
+        }
+      }),
+      { numRuns: UART_RUNS },
+    );
+    console.log(`stop-bit inversion, collated frames: ${lostAfter} following frames lost over ${cases0} cases`);
+  });
+
+  it('requirement 6.4: a short space pulse is a false start, gives no char and the search goes on', () => {
+    for (const fs of [8000, 22050, 44100.3, 48000, 96000]) {
+      for (const width of [0.3, 0.4]) {
+        const T = 1 / FWD.baud;
+        const segs: [number, number][] = [
+          [FWD.markHz, 0.06],
+          [FWD.spaceHz, width * T],
+          [FWD.markHz, 0.03],
+          ...frameSegments(0x41),
+          [FWD.markHz, 0.03],
+        ];
+        const { x, startsS } = toneSegments(fs, segs, 0.5);
+        const { chars, uart } = decodeChars(x, fs);
+        expect(uart.falseStarts, `fs=${fs} width=${width}`).toBeGreaterThanOrEqual(1);
+        expect(chars.length, `fs=${fs} width=${width}`).toBe(1);
+        expect(chars[0]).toMatchObject({ value: 0x41, parityOk: true, framingOk: true });
+        expect(Math.abs(chars[0].atSample - startsS[3] * fs)).toBeLessThanOrEqual(matchTol(fs));
+      }
+    }
+  });
+
+  it('characterization: a space pulse of 0.6 T passes the start check (mean s > 0) and reads as 0x7F with good parity and framing', () => {
+    // design.md UART: the start check is "mean of s over the central window > 0". Measured: pulses
+    // up to 0.4 T are false starts; from about 0.5 T the filtered pulse keeps a positive mean.
+    const T = 1 / FWD.baud;
+    for (const fs of [8000, 22050, 48000, 96000]) {
+      const { x } = toneSegments(fs, [[FWD.markHz, 0.06], [FWD.spaceHz, 0.6 * T], [FWD.markHz, 0.03]], 0.5);
+      const { chars, uart } = decodeChars(x, fs);
+      expect(uart.falseStarts, `fs=${fs}`).toBe(0);
+      expect(chars.map((c) => [c.value, c.parityOk, c.framingOk]), `fs=${fs}`).toEqual([[0x7f, true, true]]);
+    }
+  });
+
+  it('T6-2: after a false start, a start edge needs 1 T of measured mark before it', () => {
+    for (const fs of [8000, 44100, 48000, 96000]) {
+      const T = 1 / FWD.baud;
+      const run = (gapBits: number) => {
+        const segs: [number, number][] = [
+          [FWD.markHz, 0.06],
+          [FWD.spaceHz, 0.4 * T],
+          [FWD.markHz, gapBits * T],
+          ...frameSegments(0x41),
+          [FWD.markHz, 0.03],
+        ];
+        const { x, startsS } = toneSegments(fs, segs, 0.5);
+        const { chars, uart } = decodeChars(x, fs);
+        expect(uart.falseStarts).toBeGreaterThanOrEqual(1);
+        return chars.filter((c) => Math.abs(c.atSample - startsS[3] * fs) <= matchTol(fs));
+      };
+      expect(run(1.5), `fs=${fs}`).toMatchObject([{ value: 0x41, parityOk: true, framingOk: true }]);
+      expect(run(0.5), `fs=${fs}`).toEqual([]);
+    }
+  });
+
+  it('reset restores the initial state', () => {
+    const fs = 16000;
+    const bytes = Uint8Array.from(ascii('3615'));
+    const m = modulate(bytes, { sampleRate: fs });
+    if (!m.ok) throw new Error('modulate');
+    const d = makeDisc(fs);
+    const u = createUart(d);
+    const first = u.push(d.push(m.value));
+    d.reset();
+    u.reset();
+    expect(u.falseStarts).toBe(0);
+    expect(u.push(d.push(m.value))).toEqual(first);
+    expect(charsAreExact(first, bytes)).toBe(true);
+  });
+
+  it('A7 convention: gamma_3k = 20 dB gives sigma^2 = A^2 fs / (12000 gamma) (R4) and Eb/N0 = gamma_3k + 10 log10(3000 / 1200) dB (R5)', () => {
+    const fs = 48000;
+    const A = MODULATE_DEFAULTS.amplitude;
+    const zeros = new Float32Array(400000);
+    const bySnr = awgn(zeros, { sampleRate: fs, snrDb: M8_SNR_3K_DB, bandwidthHz: 3000, signalAmplitude: A, seed: 7 });
+    const ebN0Db = M8_SNR_3K_DB + 10 * Math.log10(3000 / FWD.baud);
+    const byEbN0 = awgn(zeros, { sampleRate: fs, ebN0Db, baud: FWD.baud, signalAmplitude: A, seed: 7 });
+    let maxDiff = 0;
+    let sumSq = 0;
+    for (let i = 0; i < zeros.length; i++) {
+      maxDiff = Math.max(maxDiff, Math.abs(bySnr[i] - byEbN0[i]));
+      sumSq += bySnr[i] * bySnr[i];
+    }
+    const sigma2 = (A * A * fs) / (12000 * 10 ** (M8_SNR_3K_DB / 10)); // R4
+    const measured = sumSq / zeros.length;
+    const ebN0FromSigma = 10 * Math.log10((A * A * fs) / (4 * FWD.baud * sigma2)); // R2
+    console.log(
+      `A7: sigma^2 expected ${sigma2.toExponential(4)}, measured ${measured.toExponential(4)}; ` +
+        `Eb/N0 = ${ebN0FromSigma.toFixed(4)} dB for gamma_3k = ${M8_SNR_3K_DB} dB`,
+    );
+    expect(Math.abs(ebN0FromSigma - 23.979400086720375)).toBeLessThan(1e-9);
+    expect(Math.abs(ebN0Db - ebN0FromSigma)).toBeLessThan(1e-9);
+    expect(maxDiff).toBeLessThanOrEqual(1e-6);
+    expect(Math.abs(measured / sigma2 - 1)).toBeLessThan(0.01);
+  });
+});
+
+describe('v23-modem task 6.3: M8 clock offset at 20 dB SNR (3 kHz)', () => {
+  const EPS_SWEEP = [-0.02, -0.015, -0.01, -0.005, 0, 0.005, 0.01, 0.015, 0.02];
+  const SWEEP_BYTES = isSlowTestsEnabled() ? 200 : 60;
+  const A = MODULATE_DEFAULTS.amplitude;
+
+  /** Noisy signal of one clock model. */
+  function clockSignal(model: 'bit-clock' | 'resampled', bytes: Uint8Array, fs: number, eps: number, idle: number, seed: number): Float32Array {
+    let clean: Float32Array;
+    if (model === 'bit-clock') {
+      clean = fskClock(lineBitsOf(bytes, idle), fs, { leadS: 0.1, tailS: 0.05, eps, amp: A });
+    } else {
+      const m = modulate(bytes, { sampleRate: fs, interFrameIdleBits: idle });
+      if (!m.ok) throw new Error('modulate');
+      clean = resample(m.value, { ratio: 1 / (1 + eps) });
+    }
+    return awgn(clean, { sampleRate: fs, snrDb: M8_SNR_3K_DB, bandwidthHz: 3000, signalAmplitude: A, seed });
+  }
+
+  for (const model of ['bit-clock', 'resampled'] as const) {
+    it(`M8 clock (${model}): for any clock error in [-2%, +2%], bytes are decoded without error at 20 dB SNR`, () => {
+      const failures: string[] = [];
+      let worstConf = Infinity;
+      const rng = createRng(model === 'bit-clock' ? 61 : 62);
+      for (const fs of STANDARD_SAMPLE_RATES) {
+        const bytes = Uint8Array.from({ length: SWEEP_BYTES }, () => Math.floor(rng.nextFloat() * 128));
+        for (const eps of EPS_SWEEP) {
+          const x = clockSignal(model, bytes, fs, eps, 0, 1000 + Math.round(eps * 1000) + fs);
+          const { chars } = decodeChars(x, fs);
+          if (!charsAreExact(chars, bytes)) {
+            const bad = chars.filter((c, j) => c.value !== bytes[j] || !c.parityOk || !c.framingOk).length;
+            failures.push(`fs=${fs} eps=${eps}: ${chars.length} chars for ${bytes.length}, ${bad} wrong`);
+          }
+          for (const c of chars) worstConf = Math.min(worstConf, c.minConfidence);
+        }
+      }
+      fc.assert(
+        fc.property(
+          arbUartRate,
+          fc.double({ min: -0.02, max: 0.02, noNaN: true }),
+          arbBytes7(1, 40),
+          fc.integer({ min: 0, max: 2 }),
+          fc.integer({ min: 1, max: 0x7fffffff }),
+          (fs, eps, bytes, idle, seed) => {
+            const { chars } = decodeChars(clockSignal(model, bytes, fs, eps, idle, seed), fs);
+            if (!charsAreExact(chars, bytes)) failures.push(`fs=${fs} eps=${eps} idle=${idle} seed=${seed} n=${bytes.length}`);
+          },
+        ),
+        { numRuns: UART_RUNS },
+      );
+      console.log(`M8 ${model}: ${failures.length} failing cases; worst minConfidence ${worstConf.toFixed(3)}`);
+      if (failures.length > 0) console.log(failures.slice(0, 20).join('\n'));
+      expect(failures).toEqual([]);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 7: streaming demodulator. Events come from the public createDemodulator.
+
+const DEMOD_RUNS = isSlowTestsEnabled() ? 60 : 12;
+
+/** Pushes x through a fresh demodulator in chunks of the given lengths; the remainder goes last. */
+function demodEvents(x: Float32Array, fs: number, chunkLens: readonly number[] = [], o: { flush?: boolean } = {}): DemodEvent[] {
+  const r = createDemodulator({ sampleRate: fs, threshold: 'fixed' });
+  if (!r.ok) throw new Error(JSON.stringify(r.error));
+  const events: DemodEvent[] = [];
+  const push = (c: Float32Array): void => {
+    for (const e of r.value.push(c)) events.push(e);
+  };
+  let pos = 0;
+  for (const len of chunkLens) {
+    if (pos >= x.length) break;
+    const end = Math.min(x.length, pos + len);
+    push(x.subarray(pos, end));
+    pos = end;
+  }
+  push(x.subarray(pos));
+  if (o.flush !== false) for (const e of r.value.flush()) events.push(e);
+  return events;
+}
+
+function charsOf(events: readonly DemodEvent[]): Extract<DemodEvent, { type: 'char' }>[] {
+  return events.filter((e): e is Extract<DemodEvent, { type: 'char' }> => e.type === 'char');
+}
+
+/** A tone of `ms` milliseconds at `fHz`, amplitude A, starting at sample 0. */
+function toneMs(fs: number, fHz: number, ms: number, amp: number): Float32Array {
+  return synth(Math.round((fs * ms) / 1000), amp, (i) => (fHz * i) / fs);
+}
+
+describe('v23-modem task 7: streaming demodulator', () => {
+  it('factory: bad-sample-rate, bad-option for threshold, channel and carrierOnDbfs; setThresholdMode is a no-op', () => {
+    for (const fs of [7999, 96001, Number.NaN, Infinity]) {
+      expect(createDemodulator({ sampleRate: fs, threshold: 'fixed' })).toEqual({
+        ok: false,
+        error: { kind: 'bad-sample-rate', sampleRate: fs },
+      });
+    }
+    // Non-integer rates are accepted (design.md "Factory").
+    expect(createDemodulator({ sampleRate: 44100.3, threshold: 'fixed' }).ok).toBe(true);
+    for (const threshold of [undefined, 'adaptive' as const, 'auto' as never]) {
+      const r = createDemodulator({ sampleRate: 48000, threshold });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toMatchObject({ kind: 'bad-option', option: 'threshold' });
+    }
+    const back = createDemodulator({ sampleRate: 48000, channel: 'backward', threshold: 'fixed' });
+    expect(back).toMatchObject({ ok: false, error: { kind: 'bad-option', option: 'channel' } });
+    expect(createDemodulator({ sampleRate: 48000, threshold: 'fixed', carrierOnDbfs: Number.NaN })).toMatchObject({
+      ok: false,
+      error: { kind: 'bad-option', option: 'carrierOnDbfs' },
+    });
+    const ok = createDemodulator({ sampleRate: 48000, threshold: 'fixed' });
+    if (!ok.ok) throw new Error('demod');
+    expect(() => ok.value.setThresholdMode('adaptive')).not.toThrow();
+    // The documented no-op keeps 'fixed': a mark tone still decodes (adaptive would also, so this
+    // checks only that the call is accepted; the mode stays 'fixed' by construction until task 8).
+  });
+
+  it('D6: a carrier of amplitude A reads 20 log10(A) dBFS; A = 0.5 reads -6.02 dBFS (docs/math.md D6)', () => {
+    const fs = 48000;
+    const amps = [1, 0.5, 0.1, 0.01];
+    for (const A of amps) {
+      const x = toneMs(fs, FWD.markHz, 200, A);
+      const det = createDetector(fs, 3, CARRIER.onDbfs);
+      const d = makeDisc(fs);
+      const out = d.push(x);
+      const estimates = [];
+      for (let m = 0; m < out.count; m++) {
+        const t = out.firstTimeSamples + m * d.decimation;
+        if (t >= d.settledTimeSamples) estimates.push({ t, re: out.re[m], im: out.im[m] });
+      }
+      const ev = det.push(x, 0, estimates);
+      // The level is not returned; check the identity directly on the settled estimates.
+      let sum = 0;
+      for (const e of estimates) sum += e.re ** 2 + e.im ** 2;
+      const level = carrierLevelDbfs(sum / estimates.length);
+      expect(Math.abs(level - 20 * Math.log10(A)), `A=${A}`).toBeLessThan(0.2);
+      expect(ev.carrier.length).toBeGreaterThan(0);
+    }
+    expect(carrierLevelDbfs(0)).toBe(-Infinity);
+  });
+
+  it('carrier: on after 20 ms above the threshold, off after 50 ms below it, hysteresis 3 dB (requirement 8.3)', () => {
+    const fs = 48000;
+    // -6.02 dBFS at A = 0.5, so the on threshold -45 dBFS is A = 0.5 * 10^((-45 + 6.02)/20).
+    const aOn = 0.5 * 10 ** ((CARRIER.onDbfs - 20 * Math.log10(0.5)) / 20);
+    const above = toneMs(fs, FWD.markHz, 1500, aOn * 1.3); // above -45
+    const events = demodEvents(above, fs, [], { flush: false });
+    const on = events.find((e) => e.type === 'carrier' && e.on);
+    expect(on && on.type === 'carrier' && on.atSample).toBeGreaterThanOrEqual(Math.round(0.02 * fs) - 1);
+    expect(on && on.type === 'carrier' && on.atSample).toBeLessThanOrEqual(Math.round(0.05 * fs));
+    // Then silence: off 50 ms after the tone ends.
+    const withSilence = new Float32Array(above.length + Math.round(0.2 * fs));
+    withSilence.set(above);
+    const ev2 = demodEvents(withSilence, fs, [], { flush: false });
+    const off = ev2.filter((e) => e.type === 'carrier' && !e.on);
+    expect(off.length).toBe(1);
+    if (off[0].type === 'carrier') {
+      expect(off[0].atSample).toBeGreaterThanOrEqual(above.length + Math.round(0.05 * fs) - fs * 0.012);
+      expect(off[0].atSample).toBeLessThanOrEqual(above.length + Math.round(0.07 * fs));
+    }
+    // Below the on threshold the carrier never turns on, even when the level is still above the
+    // off threshold: hysteresis only delays the drop, it does not lower the level needed to start.
+    const weak = demodEvents(toneMs(fs, FWD.markHz, 500, aOn * 10 ** (-4 / 20)), fs, [], { flush: false });
+    expect(weak.some((e) => e.type === 'carrier')).toBe(false);
+    const justUnder = demodEvents(toneMs(fs, FWD.markHz, 500, aOn * 10 ** (-1 / 20)), fs, [], { flush: false });
+    expect(justUnder.some((e) => e.type === 'carrier')).toBe(false);
+    // Once on, a level between the two thresholds (2 dB under the on threshold, 1 dB over the off
+    // threshold) holds the carrier: it does not drop.
+    const midLen = Math.round(0.5 * fs);
+    const held = new Float32Array(above.length + midLen);
+    held.set(above, 0);
+    held.set(toneMs(fs, FWD.markHz, 500, aOn * 10 ** (-2 / 20)), above.length);
+    const heldEvents = demodEvents(held, fs, [], { flush: false });
+    expect(heldEvents.filter((e) => e.type === 'carrier')).toEqual([
+      expect.objectContaining({ type: 'carrier', on: true }),
+    ]);
+  });
+
+  it('connect: 500 ms of 2100 Hz gives one connect, 450 ms gives none; a page and noise give none (requirement 3.3)', () => {
+    const fs = 48000;
+    // flush releases the events held at the end of the input (design.md "Event dates and latency").
+    const tone = (ms: number, amp = 0.5) => demodEvents(toneMs(fs, ANSWER_TONE_HZ, ms, amp), fs);
+    const connects = (ms: number) => tone(ms).filter((e) => e.type === 'connect');
+    expect(connects(450)).toHaveLength(0);
+    const c500 = connects(500);
+    expect(c500).toHaveLength(1);
+    if (c500[0].type === 'connect') expect(Math.abs(c500[0].atSample - Math.round(0.5 * fs))).toBeLessThanOrEqual(1);
+    // Once per tone, re-armed after a gap.
+    const two = demodEvents(
+      (() => {
+        const a = toneMs(fs, ANSWER_TONE_HZ, 600, 0.5);
+        const gap = new Float32Array(Math.round(0.1 * fs));
+        const b = toneMs(fs, ANSWER_TONE_HZ, 600, 0.5);
+        const all = new Float32Array(a.length + gap.length + b.length);
+        all.set(a, 0);
+        all.set(b, a.length + gap.length);
+        return all;
+      })(),
+      fs,
+    );
+    expect(two.filter((e) => e.type === 'connect')).toHaveLength(2);
+    // A tone under the carrier threshold is not an answer tone.
+    expect(tone(700, 0.0001).filter((e) => e.type === 'connect')).toHaveLength(0);
+    // A page of data is not 500 ms of pure 2100 Hz.
+    const page = modulate(Uint8Array.from(ascii('3615 SOMMAIRE 3615 SOMMAIRE')), { sampleRate: fs });
+    if (!page.ok) throw new Error('modulate');
+    expect(demodEvents(page.value, fs).filter((e) => e.type === 'connect')).toHaveLength(0);
+    // The default connection sequence (700 ms of answer tone) gives exactly one.
+    const seq = connectionSequence({ sampleRate: fs });
+    expect(demodEvents(seq, fs).filter((e) => e.type === 'connect')).toHaveLength(1);
+  });
+
+  it('diag: at absolute 50 ms boundaries, at most every 50 ms, with the decimated discriminator output (requirement 8.4)', () => {
+    const fs = 48000;
+    const x = toneMs(fs, FWD.markHz, 1000, 0.5);
+    const every = Math.round(0.05 * fs);
+    const disc = makeDisc(fs);
+    // design.md "Event dates and latency": the latest estimate is dated (last kept input index) -
+    // (L - 1)/2 - D/2, and an event dated a is released by push once an estimate dated
+    // a + 9.75 T + D + 0.5 has arrived. Without flush, the diags of the last boundaries are held;
+    // flush releases them.
+    const D0 = disc.decimation;
+    const lastKept = Math.floor(x.length / D0) * D0 - 1;
+    const lastT = lastKept - disc.groupDelaySamples - D0 / 2;
+    const releaseLag = 9.75 * (fs / FWD.baud) + D0 + 0.5;
+    const withoutFlush = demodEvents(x, fs, [1, 7, 4000], { flush: false }).filter((e) => e.type === 'diag');
+    expect(withoutFlush.length).toBe(Math.floor((lastT - releaseLag) / every));
+    expect(withoutFlush.length).toBe(19);
+    const events = demodEvents(x, fs, [1, 7, 4000]);
+    const diags = events.filter((e): e is Extract<DemodEvent, { type: 'diag' }> => e.type === 'diag');
+    const D = Math.max(1, Math.floor(fs / 16000));
+    // 1000 ms is itself a boundary, so flush adds no extra diag: exactly 20, all distinct.
+    expect(diags.length).toBe(Math.floor(1000 / 50));
+    expect(new Set(diags.map((g) => g.atSample)).size).toBe(diags.length);
+    diags.forEach((g, i) => {
+      expect(g.atSample).toBe(Math.round((i + 1) * 0.05 * fs));
+      expect(g.decimation).toBe(D);
+      expect(g.thresholdHz).toBe(FWD.thresholdHz);
+      expect(g.markHz).toBe(FWD.markHz);
+      expect(g.spaceHz).toBe(FWD.spaceHz);
+      expect(g.nonFiniteCount).toBe(0);
+      // About 0.05 * fs / D estimates per diag, and they read the mark tone. In the last diag, the
+      // estimates dated within (L - 1)/2 of the end of the input see the zeros after it (flush):
+      // only the first half of that diag is checked.
+      expect(g.freqHz.length).toBeGreaterThan(700);
+      expect(g.freqHz.length).toBeLessThan(900);
+      const checked = i === diags.length - 1 ? g.freqHz.subarray(0, g.freqHz.length / 2) : g.freqHz;
+      for (const f of checked) expect(Math.abs(f - FWD.markHz)).toBeLessThan(30);
+    });
+    // A NaN in the input is counted once and does not throw.
+    const dirty = x.slice();
+    dirty[100] = Number.NaN;
+    dirty[5000] = Infinity;
+    const diags2 = demodEvents(dirty, fs, [], { flush: false }).filter((e) => e.type === 'diag');
+    const last = diags2[diags2.length - 1];
+    expect(last && last.type === 'diag' && last.nonFiniteCount).toBe(2);
+  });
+
+  it('diag bitWindows: the windows of a completed frame fall inside the frame and cover its 10 bits', () => {
+    const fs = 16000;
+    const bytes = Uint8Array.from([0x41]);
+    const m = modulate(bytes, { sampleRate: fs, leadIdleMs: 200, tailIdleMs: 100 });
+    if (!m.ok) throw new Error('modulate');
+    const diags = demodEvents(m.value, fs).filter((e): e is Extract<DemodEvent, { type: 'diag' }> => e.type === 'diag');
+    const windows = diags.flatMap((g) => g.bitWindows);
+    expect(windows).toHaveLength(10);
+    // A frame is reported whole, in a single diag.
+    expect(diags.filter((g) => g.bitWindows.length > 0).map((g) => g.bitWindows.length)).toEqual([10]);
+    const start = frameStarts(1, fs, 200, 0)[0];
+    const bit = fs / FWD.baud;
+    windows.forEach(([a, b], i) => {
+      expect(Math.abs(a - (start + i * bit))).toBeLessThan(bit / 2);
+      expect(b - a).toBeCloseTo(bit, 5);
+    });
+  });
+
+  it('bitWindows of a frame straddling a diag boundary: whole, in the diag that contains its decision time, for any chunking (regression)', () => {
+    // Frame edge 20 samples before a 50 ms boundary, decided about 9.75 bit periods later. Before
+    // the fix, 1-sample chunks lost the 2 windows that start before the boundary.
+    for (const fs of [16000, 44100, 48000]) {
+      const every = Math.round(0.05 * fs);
+      const boundary = 4 * every;
+      const bit = fs / FWD.baud;
+      const m = modulate(Uint8Array.from([0x55]), {
+        sampleRate: fs,
+        leadIdleMs: ((boundary - 20) / fs) * 1000,
+        tailIdleMs: 60,
+      });
+      if (!m.ok) throw new Error('modulate');
+      const whole = demodEvents(m.value, fs);
+      const byOne = demodEvents(m.value, fs, Array.from({ length: m.value.length }, () => 1));
+      expect(byOne, `fs=${fs}`).toEqual(whole);
+      const [c] = charsOf(whole);
+      expect(c, `fs=${fs}`).toMatchObject({ value: 0x55, parityOk: true, framingOk: true });
+      const carrying = whole.filter((e): e is Extract<DemodEvent, { type: 'diag' }> => e.type === 'diag' && e.bitWindows.length > 0);
+      expect(carrying.map((g) => g.bitWindows.length), `fs=${fs}`).toEqual([10]);
+      const decision = c.atSample + 9.75 * bit;
+      const g = carrying[0];
+      expect(g.atSample, `fs=${fs}`).toBeGreaterThan(decision - 1);
+      expect(g.atSample - every, `fs=${fs}`).toBeLessThanOrEqual(decision + 1);
+    }
+  });
+
+  it('flush: one final diag at the end of the input for the interval since the last boundary; the 50 ms grid resumes after it', () => {
+    const fs = 16000;
+    const every = Math.round(0.05 * fs);
+    const x = toneMs(fs, FWD.markHz, 130, 0.5); // ends 30 ms after the 100 ms boundary
+    const r = createDemodulator({ sampleRate: fs, threshold: 'fixed' });
+    if (!r.ok) throw new Error('demod');
+    const pushed = r.value.push(x);
+    const flushed = r.value.flush();
+    const diags = [...pushed, ...flushed].filter((e): e is Extract<DemodEvent, { type: 'diag' }> => e.type === 'diag');
+    expect(diags.map((g) => g.atSample)).toEqual([every, 2 * every, x.length]);
+    const last = diags[diags.length - 1];
+    // The last diag holds the settled estimates dated in [100 ms, end): no estimate dated after the end.
+    expect(last.freqHz.length).toBe(x.length - 2 * every);
+    // Estimates dated before end - (L - 1)/2 use real input only and read the mark tone; the last
+    // (L - 1)/2 see the zeros of the flush padding (the filter tail) and are not checked.
+    const tail = Math.ceil(makeDisc(fs).groupDelaySamples) + 1;
+    for (const f of last.freqHz.subarray(0, last.freqHz.length - tail)) expect(Math.abs(f - FWD.markHz)).toBeLessThan(30);
+    // After flush, time continues and the next diag is on the absolute grid (150 ms), not 50 ms
+    // after the end of the input.
+    const after = r.value.push(toneMs(fs, FWD.markHz, 100, 0.5)).filter((e) => e.type === 'diag');
+    expect(after[0]?.atSample).toBe(3 * every);
+  });
+
+  it('M1 through the public demodulator: createDemodulator decodes modulate(b), then flush, at 8 rates', () => {
+    const rng = createRng(77);
+    for (const fs of STANDARD_SAMPLE_RATES) {
+      const bytes = Uint8Array.from({ length: 40 }, () => Math.floor(rng.nextFloat() * 128));
+      const m = modulate(bytes, { sampleRate: fs });
+      if (!m.ok) throw new Error('modulate');
+      const chars = charsOf(demodEvents(m.value, fs));
+      expect(chars.map((c) => c.value), `fs=${fs}`).toEqual(Array.from(bytes));
+      expect(chars.every((c) => c.parityOk && c.framingOk), `fs=${fs}`).toBe(true);
+    }
+  });
+
+  it('M5 chunk invariance: any partition, empty chunks included, gives the same events', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(16000, 48000),
+        arbBytes7(1, 15),
+        fc.array(fc.integer({ min: 0, max: 5000 }), { maxLength: 25 }),
+        (fs, bytes, lens) => {
+          const seq = connectionSequence({ sampleRate: fs, answerToneMs: 500, silenceMs: 40, carrierMs: 40 });
+          const m = modulate(bytes, { sampleRate: fs, leadIdleMs: 60, tailIdleMs: 40 });
+          if (!m.ok) throw new Error('modulate');
+          const x = new Float32Array(seq.length + m.value.length);
+          x.set(seq, 0);
+          x.set(m.value, seq.length);
+          const whole = demodEvents(x, fs, []);
+          const parts = demodEvents(x, fs, [0, 1, ...lens]);
+          expect(parts).toEqual(whole);
+        },
+      ),
+      { numRuns: DEMOD_RUNS },
+    );
+  });
+
+  it('silence and a dropped carrier produce no characters; flush emits the carrier off and the tail', () => {
+    const fs = 48000;
+    const bytes = Uint8Array.from(ascii('AB'));
+    const m = modulate(bytes, { sampleRate: fs, leadIdleMs: 100, tailIdleMs: 30 });
+    if (!m.ok) throw new Error('modulate');
+    // Without flush the short tail may hold the last frame; with flush every byte comes out and
+    // the carrier ends off.
+    const flushed = demodEvents(m.value, fs);
+    expect(charsOf(flushed).map((c) => c.value)).toEqual([65, 66]);
+    const carriers = flushed.filter((e) => e.type === 'carrier');
+    expect(carriers[carriers.length - 1]).toMatchObject({ type: 'carrier', on: false });
+    // Pure silence: no carrier, no char.
+    const quiet = demodEvents(new Float32Array(Math.round(0.3 * fs)), fs);
+    expect(quiet.some((e) => e.type === 'carrier' || e.type === 'char')).toBe(false);
+  });
+
+  it('robustness: arbitrary samples never throw and events are well typed', () => {
+    const types = ['carrier', 'connect', 'char', 'diag'];
+    fc.assert(
+      fc.property(fc.float64Array({ minLength: 0, maxLength: 4000 }), (values) => {
+        const x = Float32Array.from(values, (v) => (Number.isFinite(v) ? Math.max(-10, Math.min(10, v)) : v));
+        let events: DemodEvent[] = [];
+        expect(() => {
+          events = demodEvents(x, 22050, [0, 1, 3]);
+        }).not.toThrow();
+        for (const e of events) {
+          expect(types).toContain(e.type);
+          expect(Number.isInteger(e.atSample)).toBe(true);
+          expect(e.atSample).toBeGreaterThanOrEqual(0);
+        }
+        expect(events.some((e) => e.type === 'quality')).toBe(false);
+      }),
+      { numRuns: DEMOD_RUNS },
+    );
+  });
+
+  it('no quality event before task 10 (decision T7-5); reset returns to the initial state', () => {
+    const fs = 16000;
+    const m = modulate(Uint8Array.from(ascii('Z')), { sampleRate: fs });
+    if (!m.ok) throw new Error('modulate');
+    const r = createDemodulator({ sampleRate: fs, threshold: 'fixed' });
+    if (!r.ok) throw new Error('demod');
+    const first = [...r.value.push(m.value), ...r.value.flush()];
+    expect(first.some((e) => e.type === 'quality')).toBe(false);
+    expect(charsOf(first).map((c) => c.value)).toEqual([90]);
+    r.value.reset();
+    expect([...r.value.push(m.value), ...r.value.flush()]).toEqual(first);
   });
 });

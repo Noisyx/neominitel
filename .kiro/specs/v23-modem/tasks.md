@@ -32,17 +32,17 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - [x] 5.3 Tests: tone accuracy ≤ 15 Hz RMS, rejection of 420 Hz and 50 Hz ≥ 40 dB, all sample rates.
   - _Requirements: 5.1-5.4_
 
-- [ ] 6. UART and fixed threshold `[MVP]`
-  - [ ] 6.1 Soft value, HUNT/START/BITS state machine with sub-sample edge location.
-  - [ ] 6.2 `char` events with parity, framing and confidence.
-  - [ ] 6.3 Property tests M1 (fixed threshold, clean), M4 (detection half, line bits 1 to 8), M8. Characterization tests for start-bit and stop-bit inversion.
+- [x] 6. UART and fixed threshold `[MVP]`
+  - [x] 6.1 Soft value, HUNT/START/BITS state machine with sub-sample edge location.
+  - [x] 6.2 `char` events with parity, framing and confidence.
+  - [x] 6.3 Property tests M1 (fixed threshold, clean), M4 (detection half, line bits 1 to 8), M8. Characterization tests for start-bit and stop-bit inversion.
   - _Requirements: 6.1-6.6_
 
-- [ ] 7. Streaming demodulator `[MVP]`
-  - [ ] 7.1 `createDemodulator` and `StreamingDemodulator` with `push`, `flush`, `reset`, events. Until task 8 lands, only `threshold: 'fixed'` is accepted (see "Threshold mode" in `design.md`); `'fixed'` remains supported afterwards.
-  - [ ] 7.2 Carrier detect with hysteresis, answer-tone detect (`connect`).
-  - [ ] 7.3 `diag` events, rate-limited to 50 ms.
-  - [ ] 7.4 Property test M5.
+- [x] 7. Streaming demodulator `[MVP]`
+  - [x] 7.1 `createDemodulator` and `StreamingDemodulator` with `push`, `flush`, `reset`, events. Until task 8 lands, only `threshold: 'fixed'` is accepted (see "Threshold mode" in `design.md`); `'fixed'` remains supported afterwards.
+  - [x] 7.2 Carrier detect with hysteresis, answer-tone detect (`connect`).
+  - [x] 7.3 `diag` events, rate-limited to 50 ms.
+  - [x] 7.4 Property test M5.
   - _Requirements: 3.3, 8.1-8.4_
 
 - [ ] 8. Adaptive threshold `[MVP]`
