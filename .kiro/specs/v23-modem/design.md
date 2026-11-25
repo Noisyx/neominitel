@@ -181,6 +181,17 @@ States `HUNT → START → BITS → HUNT`. With T = fs_d / baud (fractional):
 - Check parity (bits 1..8 even) and stop bit (bit 9 = 1). Emit `char`. On a framing error, return to HUNT at the current position.
 - Each frame re-synchronises on its own start bit, so a clock error ε shifts the last sample by 9.75·ε·T. At ε = 2% that is 0.2 T, still inside the central window.
 
+Implementation choices (task 6, `src/modem/uart.ts` and `threshold.ts`, internal to the core; recorded per AGENTS.md rule 7):
+- **Input.** The UART reads the discriminator estimates (task 5) on their uniform grid of D input samples. Estimates dated before the discriminator's `settledTimeSamples` (filter warm-up) are ignored. All arithmetic is in double precision; the result does not depend on chunk boundaries.
+- **Window mean (T6-1).** s between two estimates is the linear interpolation, and the mean over a window is the exact integral of that piecewise-linear s divided by the window length. The result does not depend on where the estimates fall in the window, which matters at 8 kHz (3.3 estimates per window).
+- **Mark before a start edge (T6-2).** The mark run is measured from the last space-to-mark crossing (interpolated). After a reset, a false start or a framing error, an edge is accepted only after at least 1 T of measured mark. After a frame with a valid stop bit, the stop bit counts as that mark.
+- **Resume point (T6-2, revised).** After a valid stop bit, HUNT resumes at the centre of the stop bit, t_e + 9.5 T; after a framing error, at the end of the stop window, t_e + 9.75 T (requirement 6.5). The first draft resumed at 9.75 T in both cases. Measured reason for the change (task 6, γ_3k = 20 dB, collated frames, 224 cases per clock model): with a transmitter clock fast by 2 %, the next start edge comes at about 9.8 T, inside the filter's transition, and resuming at 9.75 T missed it in 26 (bit clock) and 27 (resampled) cases, then decoded misaligned frames; resuming at 9.5 T gave 0 failures, and clean signals gave 0 failures either way.
+- **`minConfidence` (T6-5).** The smallest |mean of s| over the 10 windows, start bit included.
+- **`atSample` (T6-6).** The interpolated time of the mark-to-space crossing of s, in input samples, group-delay compensated (task 5 dating). Requirement 6.1 ("sub-sample precision") is read on the grid the UART works on: the edge is located between two estimates, and the target on a clean signal is **≤ 1 decimated estimate, i.e. ≤ D input samples**. The residual error is about 36 µs (0.03 to 0.05 T) whatever the sampling rate, caused by inter-symbol interference through the discriminator (largest when the start bit lasts only 1 T, d0 = 1); it is therefore about 3.4 input samples at 96 kHz (D = 6) and 0.3 at 8 kHz (D = 1). A target of 1 input sample was rejected: it cannot be met above 32 kHz without a different receiver.
+- **Start check.** As specified, a start bit is valid when the mean of s over its central window is positive. Measured: an isolated space pulse of up to 0.4 T is rejected as a false start; from about 0.5 T it passes and is read as a frame (0x7F with good parity and framing for an isolated pulse). This is a property of the criterion, covered by a characterization test; carrier detection (task 7) limits it to the carrier-on periods.
+- **Threshold.** Fixed at `thresholdHz` (1700 Hz forward) until task 8.
+- **Noise in M8.** "20 dB SNR" is γ_3k = 20 dB (glossary: noise in 3 kHz unless stated otherwise), i.e. Eb/N0 = 23.98 dB, under the convention of `docs/math.md` section 2 (A7). M8 is tested with two clock models: a transmitter bit clock off by ε with nominal tones, and the whole signal resampled by 1/(1 + ε) (tones shifted too).
+
 ### Carrier and answer tone
 - Carrier: mean |z|² over 10 ms. On when it is above `carrierOnDbfs` for 20 ms, off when it is below `carrierOnDbfs − 3 dB` for 50 ms.
 - Answer tone: Goertzel at 2100 Hz over 20 ms blocks, compared with the total band energy. `connect` is emitted after 500 ms of continuous tone.
@@ -217,7 +228,7 @@ These notes are for the mathematician to check and extend.
 | M5 | Chunk invariance: for any partition of the input into chunks, the event list is identical. |
 | M6 | Noise: at Eb/N0 ≥ 12 dB (target, to calibrate), BER on 20 000 PN9 bits is ≤ 1e-3 for 20 seeds. |
 | M7 | Offset: in adaptive mode, for any offset in [−400, +400] Hz at 20 dB SNR, bytes are decoded without error and \|offsetHz − true offset\| ≤ 20. |
-| M8 | Clock: for any clock error in [−2%, +2%], bytes are decoded without error at 20 dB SNR. |
+| M8 | Clock: for any clock error in [−2%, +2%], bytes are decoded without error at 20 dB SNR (γ_3k, see "UART"). |
 | M9 | WAV: readWav(writeWav(x)) equals x quantized to 16 bits. |
 | M10 | SNR estimator: for band SNR in [0, 30] dB, the estimate is within ±1 dB (mean over 10 seeds). |
 | M11 | PN9: period is 511; with k injected bit errors among n bits and no framing errors, the counter reports exactly k errors. |

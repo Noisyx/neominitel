@@ -48,9 +48,10 @@ Eb/N0 (section 2).
 
 ## 2. Signal and noise convention
 
-> **Status: Draft.** Experiment E3a has been executed (section 3.2) and is consistent with this
-> convention. The convention becomes final when both developers sign it below.
-> Numeric conversion examples are added only after both signatures (decision A7).
+> **Status: Adopted for the modem tests (decision T6-3, Role B), signatures pending.** Experiment E3a
+> has been executed (section 3.2) and is consistent with this convention. Property M8 and the noise
+> tests from task 6 on use it as written here (section 2.4). It becomes final when both developers
+> sign below; each developer signs for themselves.
 >
 > Signed, Role A: ________ (date: ____)   Signed, Role B: ________ (date: ____)
 
@@ -129,6 +130,23 @@ information bit (7 of 10), Eb/N0 would be 10 log10(10/7) = 1.55 dB higher. (`Ide
   Eb/N0 = γ_band + 10 log10(B_n / R).
 
 E3a verifies that the implemented chain realises D1 to D5 (section 3.2).
+
+### 2.4 Use in the tests (decision T6-3)
+
+- **Noise generator.** The test helper `awgn` (`tests/helpers/awgn-resample.ts`) realises D2:
+  N0 = P / (B · γ) for a target SNR γ in a reference band B (or N0 = P / (R · Eb/N0) for a target
+  Eb/N0), then σ² = N0 · fs / 2. The reference power is P = A² / 2 with A the `signalAmplitude`
+  option, so silences and ramps do not change the noise level (D1).
+- **SNR without a band means γ_3k.** The glossary of `requirements.md` measures noise in 3 kHz
+  unless stated otherwise. "20 dB SNR" in requirement 6.6 and property M8 is therefore
+  γ_3k = 20 dB, generated with `awgn({ snrDb: 20, bandwidthHz: 3000, signalAmplitude: A })`.
+- **Conversion for M8** (R4, R5, with R = 1200 line bits per second): γ_3k = 20 dB gives
+  σ² = A² fs / (12000 · 100) and Eb/N0 = 20 + 10 log10(3000 / 1200) = 23.98 dB. With A = 0.5 and
+  fs = 48 kHz, σ² = 0.0100. (`Identity`)
+- **Checked by a test** in `tests/properties/v23-modem.test.ts` ("A7 convention"): the σ² derived
+  from R4 gives 23.9794 dB through R2; `awgn` with `snrDb: 20` and with `ebN0Db: 23.98` produce the
+  same noise for the same seed (difference ≤ 10⁻⁶); the measured noise variance over 4·10⁵ samples
+  is within 1 % of σ² (measured +0.47 %).
 
 ---
 

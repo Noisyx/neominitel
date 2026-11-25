@@ -32,10 +32,10 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - [x] 5.3 Tests: tone accuracy ≤ 15 Hz RMS, rejection of 420 Hz and 50 Hz ≥ 40 dB, all sample rates.
   - _Requirements: 5.1-5.4_
 
-- [ ] 6. UART and fixed threshold `[MVP]`
-  - [ ] 6.1 Soft value, HUNT/START/BITS state machine with sub-sample edge location.
-  - [ ] 6.2 `char` events with parity, framing and confidence.
-  - [ ] 6.3 Property tests M1 (fixed threshold, clean), M4 (detection half, line bits 1 to 8), M8. Characterization tests for start-bit and stop-bit inversion.
+- [x] 6. UART and fixed threshold `[MVP]`
+  - [x] 6.1 Soft value, HUNT/START/BITS state machine with sub-sample edge location.
+  - [x] 6.2 `char` events with parity, framing and confidence.
+  - [x] 6.3 Property tests M1 (fixed threshold, clean), M4 (detection half, line bits 1 to 8), M8. Characterization tests for start-bit and stop-bit inversion.
   - _Requirements: 6.1-6.6_
 
 - [ ] 7. Streaming demodulator `[MVP]`
