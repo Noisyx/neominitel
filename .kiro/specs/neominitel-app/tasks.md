@@ -19,27 +19,27 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Depends o
   - [x] 3.3 Connection sequence on *Connexion*, then SOMMAIRE in `Seul` mode.
   - _Requirements: 1.2-1.5_
 
-- [ ] 4. Router, services and content `[MVP]`
-  - [ ] 4.1 `Service` interface, router, local echo, *Répétition* handling.
-  - [ ] 4.2 3615 SOMMAIRE pages and code entry; error page for unknown codes.
-  - [ ] 4.3 Content lint (property A6).
-  - [ ] 4.4 Property tests A1, A2.
+- [x] 4. Router, services and content `[MVP]`
+  - [x] 4.1 `Service` interface, router, local echo, *Répétition* handling.
+  - [x] 4.2 3615 SOMMAIRE pages and code entry; error page for unknown codes.
+  - [x] 4.3 Content lint (property A6).
+  - [x] 4.4 Property tests A1, A2.
   - _Requirements: 5.1-5.5_
 
-- [ ] 5. Terminal keyboard `[MVP]`
+- [x] 5. Terminal keyboard `[MVP]`
   - On-screen function keys, PC shortcuts with `KeyboardEvent.code`, mobile text input, palette switch.
   - _Requirements: 4.2-4.5_
 
-- [ ] 6. End-to-end loopback test `[MVP]`
+- [x] 6. End-to-end loopback test `[MVP]`
   - Property test A3 for every page.
   - _Requirements: 2.1_
 
-- [ ] 7. Microphone receive (`Écoute`) `[MVP]`
-  - [ ] 7.1 Capture worklet, raw constraints check, `MessageChannel` to the worker.
-  - [ ] 7.2 Permission screen, raw-audio warning, no-carrier hint.
+- [x] 7. Microphone receive (`Écoute`) `[MVP]`
+  - [x] 7.1 Capture worklet, raw constraints check, `MessageChannel` to the worker.
+  - [x] 7.2 Permission screen, raw-audio warning, no-carrier hint.
   - _Requirements: 2.2, 10.1-10.3_
 
-- [ ] 8. Server mode (`Serveur`) `[MVP]`
+- [x] 8. Server mode (`Serveur`) `[MVP]`
   - Service runs on this device, pages played clean through the speaker, local preview.
   - _Requirements: 2.3_
 
