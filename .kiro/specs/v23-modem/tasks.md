@@ -67,12 +67,12 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - [x] 11.3 Property test M12.
   - _Requirements: 10.4_
 
-- [ ] 12. Calibration `[MVP]`
-  - Run `scripts/calibrate-modem.ts`, set the M6 Eb/N0 target and the connection-sequence durations, record everything in `docs/calibration.md`. (M6 part done early, with task 11: 16.5 dB. Connection-sequence durations still to do.)
+- [x] 12. Calibration `[MVP]`
+  - Run `scripts/calibrate-modem.ts`, set the M6 Eb/N0 target and the connection-sequence durations, record everything in `docs/calibration.md`. (M6: 16.5 dB, task 11. Connection defaults kept (700/150/300 ms) after measurement against the receiver; the check against a reference recording (requirement 3.2) waits for the first license-checked recording, task 16. Defect found and fixed: adaptive initialisation on noise, design.md "Threshold", steady-window gate.)
   - _Requirements: 3.2, 9.3_
 
-- [ ] 13. Performance `[MVP]`
-  - Benchmark (`scripts/bench-modem.ts`) 60 s of 48 kHz audio in Node; must run in under 3.6 s. Profile the FIR if not. A preliminary run is recorded earlier in `docs/calibration.md`.
+- [x] 13. Performance `[MVP]`
+  - Benchmark (`scripts/bench-modem.ts`) 60 s of 48 kHz audio in Node; must run in under 3.6 s. Profile the FIR if not. A preliminary run is recorded earlier in `docs/calibration.md`. (Measured: 60 s in about 1.9 s, 31.9 ms per s at most; modulator 24.5 ms per 1 000 characters. No profiling needed. The preliminary run is E7, `docs/math.md` 3.4. Figures in `docs/calibration.md` "Performance".)
   - _Requirements: 13.1-13.2_
 
 - [ ] 14. Backward channel `[STRETCH]`

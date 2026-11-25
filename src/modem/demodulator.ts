@@ -4,7 +4,7 @@
 // only createDemodulator is exported, from task 7 on (decision T7-8).
 import { createDetector } from './carrier';
 import { createDiscriminator, type DiscriminatorOutput } from './discriminator';
-import { ADAPTIVE_INIT_MS, createThresholdSource, type ThresholdMode, type ThresholdState } from './threshold';
+import { ADAPTIVE_INIT_MAX_OFFSET_HZ, ADAPTIVE_INIT_MAX_STD_HZ, ADAPTIVE_INIT_MS, ADAPTIVE_INIT_TIMEOUT_MS, createThresholdSource, type ThresholdMode, type ThresholdState } from './threshold';
 import type { DemodEvent, DemodOptions, ModemError, Result, StreamingDemodulator } from './types';
 import { m2m4, parityErrorRate, snrReport } from './quality';
 import { createUart, type UartChar } from './uart';
@@ -206,14 +206,19 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
     return awaitingQuality.length > 0 ? awaitingQuality[0].atSample : Infinity;
   }
 
-  // Adaptive threshold (task 8). After each carrier on, the mean frequency of the estimates dated
-  // in [onT, onT + 20 ms) initialises mu_mark (idle carrier is mark), in both modes, so a switch to
-  // adaptive can use it. In adaptive mode the UART starts only once that estimate exists; once
-  // started it is fed continuously, whatever the mode switches.
-  let initStart = NaN; // carrier-on time of the pending initialisation (NaN = none pending)
+  // Adaptive threshold (task 8). After each carrier on, the mean frequency of the estimates of the
+  // first steady 20 ms window (task 12: std and offset gates, from [onT, onT + 20 ms) on) initialises
+  // mu_mark (idle carrier is mark), in both modes, so a switch to adaptive can use it. In adaptive
+  // mode the UART starts only once that estimate exists, or once ADAPTIVE_INIT_TIMEOUT_MS has passed
+  // without a steady window (nominal threshold); once started it is fed continuously.
+  let initStart = NaN; // start of the pending initialisation window (NaN = none pending)
   let initSum = 0;
+  let initSumSq = 0;
   let initCount = 0;
+  let initDeadline = Infinity; // carrier-on time + ADAPTIVE_INIT_TIMEOUT_MS
+  let initGaveUp = false;
   let uartStarted = false;
+  const initTimeoutSamples = (ADAPTIVE_INIT_TIMEOUT_MS / 1000) * d.sampleRate;
   // Threshold states with the time they take effect, for diags (chunk-invariant reporting).
   const stateLog: { t: number; s: ThresholdState }[] = [{ t: -Infinity, s: threshold.state() }];
 
@@ -242,7 +247,10 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
     threshold.clear();
     initStart = NaN;
     initSum = 0;
+    initSumSq = 0;
     initCount = 0;
+    initDeadline = Infinity;
+    initGaveUp = false;
     uartStarted = false;
     logState(at);
   }
@@ -337,15 +345,32 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
       if (!Number.isNaN(initStart)) {
         if (s.t < initStart + initSamples) {
           initSum += s.f;
+          initSumSq += s.f * s.f;
           initCount++;
         } else {
-          pushToUart(slice);
-          if (initCount > 0) threshold.initMark(initSum / initCount);
-          initStart = NaN;
-          logState(s.t);
+          // Task 12: only a steady mark carrier initialises mu_mark (noise or the answer tone can
+          // turn the carrier on). Otherwise the next window, starting at this estimate, is tried.
+          const mean = initCount > 0 ? initSum / initCount : NaN;
+          const std = initCount > 0 ? Math.sqrt(Math.max(0, initSumSq / initCount - mean * mean)) : NaN;
+          if (std <= ADAPTIVE_INIT_MAX_STD_HZ && Math.abs(mean - spec.markHz) <= ADAPTIVE_INIT_MAX_OFFSET_HZ) {
+            pushToUart(slice);
+            threshold.initMark(mean);
+            initStart = NaN;
+            logState(s.t);
+          } else if (s.t >= initDeadline) {
+            // No steady window in time: run on the nominal threshold until the next carrier on.
+            initStart = NaN;
+            initGaveUp = true;
+            logState(s.t);
+          } else {
+            initStart = s.t;
+            initSum = s.f;
+            initSumSq = s.f * s.f;
+            initCount = 1;
+          }
         }
       }
-      if (!uartStarted && threshold.mode === 'adaptive' && !threshold.initialised) continue;
+      if (!uartStarted && threshold.mode === 'adaptive' && !threshold.initialised && !initGaveUp) continue;
       uartStarted = true;
       slice.push(s);
     }
@@ -406,7 +431,10 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
       } else {
         initStart = ev.atSample;
         initSum = 0;
+        initSumSq = 0;
         initCount = 0;
+        initDeadline = ev.atSample + initTimeoutSamples;
+        initGaveUp = false;
       }
       carrierOn = ev.on;
       hold({ type: 'carrier', on: ev.on, atSample: atIndex(ev.atSample) });
@@ -494,7 +522,10 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
       threshold.clear();
       initStart = NaN;
       initSum = 0;
+      initSumSq = 0;
       initCount = 0;
+      initDeadline = Infinity;
+      initGaveUp = false;
       uartStarted = false;
       stateLog.length = 0;
       stateLog.push({ t: -Infinity, s: threshold.state() });

@@ -20,6 +20,23 @@ export function softValue(fHz: number, thresholdHz: number, spec: ChannelSpec): 
 export const ADAPTIVE_ALPHA = 0.05;
 /** Duration of idle carrier averaged to initialise the mark estimate (design.md "Threshold"). */
 export const ADAPTIVE_INIT_MS = 20;
+/**
+ * An initialisation window is used only if it looks like a steady mark carrier (task 12,
+ * docs/calibration.md "Adaptive initialisation"): standard deviation of its estimates at most
+ * ADAPTIVE_INIT_MAX_STD_HZ and mean within ADAPTIVE_INIT_MAX_OFFSET_HZ of markHz. Otherwise the
+ * next window is tried. Measured on 20 ms windows: a mark carrier at Eb/N0 >= 12 dB has std
+ * <= 430 Hz, noise alone >= 633 Hz; the answer tone is 800 Hz from mark (2100 Hz).
+ */
+export const ADAPTIVE_INIT_MAX_STD_HZ = 500;
+export const ADAPTIVE_INIT_MAX_OFFSET_HZ = 500;
+/**
+ * If no window qualifies within this time after carrier on, the UART starts with the nominal
+ * threshold and no further window is tried until the next carrier on (below Eb/N0 ~ 8 dB no 20 ms
+ * window is steady enough). Longer than the default answer tone + silence (850 ms), so a noisy
+ * line that keeps the carrier on through the connection sequence still initialises on the mark
+ * carrier that follows.
+ */
+export const ADAPTIVE_INIT_TIMEOUT_MS = 1000;
 
 export type ThresholdMode = 'fixed' | 'adaptive';
 

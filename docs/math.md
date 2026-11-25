@@ -351,10 +351,10 @@ Values from the code (curves 1 and 2) and from `public/data/ber-curve3.json` (cu
 
 | Eb/N0 | Curve 1 | Curve 2 (\|ρ\| = 0.4135) | Curve 3 (95 % interval) |
 |---|---|---|---|
-| 2 dB | 2.26·10^-1 | 2.49·10^-1 | 6.65·10^-1 [6.62·10^-1, 6.68·10^-1] |
-| 4 dB | 1.42·10^-1 | 1.69·10^-1 | 6.35·10^-1 [6.32·10^-1, 6.38·10^-1] |
-| 6 dB | 6.83·10^-2 | 9.42·10^-2 | 5.51·10^-1 [5.48·10^-1, 5.53·10^-1] |
-| 8 dB | 2.13·10^-2 | 3.93·10^-2 | 3.74·10^-1 [3.71·10^-1, 3.76·10^-1] |
+| 2 dB | 2.26·10^-1 | 2.49·10^-1 | 6.81·10^-1 [6.78·10^-1, 6.85·10^-1] |
+| 4 dB | 1.42·10^-1 | 1.69·10^-1 | 6.37·10^-1 [6.34·10^-1, 6.40·10^-1] |
+| 6 dB | 6.83·10^-2 | 9.42·10^-2 | 5.49·10^-1 [5.46·10^-1, 5.52·10^-1] |
+| 8 dB | 2.13·10^-2 | 3.93·10^-2 | 3.73·10^-1 [3.71·10^-1, 3.76·10^-1] |
 | 10 dB | 3.37·10^-3 | 1.08·10^-2 | 1.58·10^-1 [1.56·10^-1, 1.60·10^-1] |
 | 12 dB | 1.81·10^-4 | 1.56·10^-3 | 3.23·10^-2 [3.15·10^-2, 3.30·10^-2] |
 | 14 dB | 1.76·10^-6 | 8.30·10^-5 | 3.20·10^-3 [2.97·10^-3, 3.44·10^-3] |
@@ -381,7 +381,8 @@ Two cautions for the reader of the plot:
 
 Reading of the measured curve 3 (`public/data/ber-curve3.json`, 10 seeds per point, 16 kHz):
 
-- **At 6 dB and below, curve 3 is above 0.5** (0.55 at 6 dB, 0.68 at 0 dB). Most frames then have a framing
+- **At 6 dB and below, curve 3 is above 0.5** (0.55 at 6 dB, 0.70 at 0 dB; regenerated after the
+  task 12 initialisation gate, identical from 10 dB up). Most frames then have a framing
   error, the counter counts all 7 of their bits as errors, and it keeps losing its lock. Curve 3
   is the reading of the app's counter, not a bit error probability, in that region.
 - **Price of the real receiver.** At 12 dB, curve 3 is 3.2·10⁻² against 1.6·10⁻³ for curve 2: the
