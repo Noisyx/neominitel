@@ -38,7 +38,16 @@ import {
   type WavErrorReason,
 } from '../../src/modem/wav';
 import { readWav as readWavPublic, writeWav as writeWavPublic, type ModulateOptions } from '../../src/modem';
-import { STANDARD_SAMPLE_RATES, arbStandardSampleRate, isSlowTestsEnabled } from '../helpers';
+import { DISCRIMINATOR } from '../../src/modem/v23';
+import {
+  ComplexDecimatingFir,
+  designLowpass,
+  hammingTapCount,
+  lowpassMagnitude,
+  noiseBandwidthHz,
+} from '../../src/modem/filters';
+import { createDiscriminator, mixerPhaseCycles, type Discriminator } from '../../src/modem/discriminator';
+import { STANDARD_SAMPLE_RATES, arbBytes7, arbStandardSampleRate, isSlowTestsEnabled } from '../helpers';
 
 const NUM_RUNS = isSlowTestsEnabled() ? 2000 : 200;
 const SIGNAL_RUNS = isSlowTestsEnabled() ? 300 : 30;
@@ -1333,5 +1342,508 @@ describe('v23-modem task 4.2: WAV properties and readWav', () => {
     let maxErr = 0;
     for (let i = 0; i < m.value.length; i++) maxErr = Math.max(maxErr, Math.abs(r.value.samples[i] - m.value[i]));
     expect(maxErr).toBeLessThanOrEqual(0.5 / 32768);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 5: discriminator. Test signals are synthesised here in double precision with closed-form
+// phases, independently of the modulator. Task 5 tests the forward channel only (decision T5-4).
+
+const DISC_RUNS = isSlowTestsEnabled() ? 100 : 15;
+const FWD = CHANNELS.forward;
+const NON_INTEGER_RATES = [8000.5, 11025.25, 22050.75, 44100.3, 47999.9, 95999.5] as const;
+const ALL_TEST_RATES: readonly number[] = [...STANDARD_SAMPLE_RATES, ...NON_INTEGER_RATES];
+const arbDiscRate = fc.oneof(
+  arbStandardSampleRate(),
+  fc.constantFrom(...NON_INTEGER_RATES),
+  fc.double({ min: 8000, max: 96000, noNaN: true }),
+);
+
+function makeDisc(fs: number): Discriminator {
+  const r = createDiscriminator(fs);
+  if (!r.ok) throw new Error(`createDiscriminator(${fs}): ${JSON.stringify(r.error)}`);
+  return r.value;
+}
+
+/** x[i] = amp sin(2 pi frac(cycles(i))), with the phase in cycles given in closed form. */
+function synth(n: number, amp: number, cycles: (i: number) => number): Float32Array {
+  const x = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const c = cycles(i);
+    x[i] = amp * Math.sin(2 * Math.PI * (c - Math.floor(c)));
+  }
+  return x;
+}
+
+function toneCycles(fs: number, fHz: number, phase0: number): (i: number) => number {
+  return (i) => (fHz * i) / fs + phase0;
+}
+
+interface Estimates {
+  t: number[];
+  f: number[];
+  re: number[];
+  im: number[];
+  /** false if a block's arrays, count or time grid were inconsistent. */
+  consistent: boolean;
+}
+
+/**
+ * Pushes x in chunks of the given lengths (the remainder in a last chunk) and concatenates the
+ * estimates. Checks that every block's arrays have `count` entries, that an empty block has a NaN
+ * time, and that each block's first time continues the previous block's grid (+ D).
+ */
+function runDisc(d: Discriminator, x: Float32Array, chunkLens: readonly number[] = []): Estimates {
+  const est: Estimates = { t: [], f: [], re: [], im: [], consistent: true };
+  const pushOne = (c: Float32Array): void => {
+    const out = d.push(c);
+    if (out.freqHz.length !== out.count || out.re.length !== out.count || out.im.length !== out.count) {
+      est.consistent = false;
+    }
+    if (out.count === 0) {
+      if (!Number.isNaN(out.firstTimeSamples)) est.consistent = false;
+      return;
+    }
+    if (est.t.length > 0 && out.firstTimeSamples !== est.t[est.t.length - 1] + d.decimation) est.consistent = false;
+    for (let m = 0; m < out.count; m++) {
+      est.t.push(out.firstTimeSamples + m * d.decimation);
+      est.f.push(out.freqHz[m]);
+      est.re.push(out.re[m]);
+      est.im.push(out.im[m]);
+    }
+  };
+  let pos = 0;
+  for (const len of chunkLens) {
+    if (pos >= x.length) break;
+    const end = Math.min(x.length, pos + len);
+    pushOne(x.subarray(pos, end));
+    pos = end;
+  }
+  pushOne(x.subarray(pos));
+  return est;
+}
+
+/** RMS of f - fHz over the settled estimates. */
+function settledRmsHz(d: Discriminator, est: Estimates, fHz: number): number {
+  let se = 0;
+  let n = 0;
+  for (let m = 0; m < est.t.length; m++) {
+    if (est.t[m] < d.settledTimeSamples) continue;
+    se += (est.f[m] - fHz) ** 2;
+    n++;
+  }
+  return Math.sqrt(se / n);
+}
+
+/** Mean |z|^2 over the settled estimates. */
+function settledPower(d: Discriminator, est: Estimates): number {
+  let s = 0;
+  let n = 0;
+  for (let m = 0; m < est.t.length; m++) {
+    if (est.t[m] < d.settledTimeSamples) continue;
+    s += est.re[m] ** 2 + est.im[m] ** 2;
+    n++;
+  }
+  return s / n;
+}
+
+/** Exact frac(mixHz * n / fs) with BigInt: fs is a binary fraction num / 2^k (any finite double). */
+function exactMixerPhase(n: number, mixHz: number, fs: number): number {
+  let v = fs;
+  let den = 1n;
+  while (!Number.isInteger(v)) {
+    v *= 2;
+    den *= 2n;
+  }
+  const num = BigInt(v);
+  const r = (BigInt(mixHz) * BigInt(n) * den) % num;
+  return Number(r) / Number(num);
+}
+
+function circularDiff(a: number, b: number): number {
+  const d = Math.abs(a - b) % 1;
+  return Math.min(d, 1 - d);
+}
+
+describe('v23-modem task 5.1: low-pass design and streaming decimating FIR', () => {
+  it('DISCRIMINATOR parameters, decimation factors and tap counts match the design and E1/E7 (T5-3)', () => {
+    // Expected values copied from design.md "Discriminator" on purpose (spec check).
+    expect(DISCRIMINATOR).toEqual({
+      forward: { transitionHz: 400, decimatedRateHz: 16000 },
+      backward: { transitionHz: 60, decimatedRateHz: 2000 },
+    });
+    expect(STANDARD_SAMPLE_RATES.map((fs) => makeDisc(fs).decimation)).toEqual([1, 1, 1, 1, 2, 2, 3, 6]);
+    // Tap counts reported by E1 (48 kHz) and E7 (8, 44.1, 96 kHz).
+    expect([8000, 44100, 48000, 96000].map((fs) => hammingTapCount(fs, 400))).toEqual([67, 365, 397, 793]);
+    for (const fs of ALL_TEST_RATES) {
+      const d = makeDisc(fs);
+      expect(d.taps.length % 2).toBe(1);
+      expect(d.groupDelaySamples).toBe((d.taps.length - 1) / 2);
+    }
+  });
+
+  it('guard: hammingTapCount and designLowpass equal the E1 prototype (prototypes/dsp/lib.mjs), B_n = 2099.0 Hz at 48 kHz', async () => {
+    const libUrl = pathToFileURL(join(ROOT, 'prototypes', 'dsp', 'lib.mjs')).href;
+    const lib = (await import(/* @vite-ignore */ libUrl)) as {
+      tapCount: (w: string, fs: number, df: number) => number;
+      designLowpass: (o: { fs: number; cutoffHz: number; transitionHz: number; window: string }) => Float64Array;
+    };
+    for (const fs of ALL_TEST_RATES) {
+      expect(hammingTapCount(fs, 400), `fs=${fs}`).toBe(lib.tapCount('hamming', fs, 400));
+      const ours = designLowpass(fs, FWD.lowpassHz, 400);
+      const ref = lib.designLowpass({ fs, cutoffHz: FWD.lowpassHz, transitionHz: 400, window: 'hamming' });
+      expect(Array.from(ours), `fs=${fs}`).toEqual(Array.from(ref));
+    }
+    // e1-summary.json, c1/hamming: noiseBandwidthHz48k = 2099.008279326559.
+    expect(noiseBandwidthHz(designLowpass(48000, FWD.lowpassHz, 400), 48000)).toBeCloseTo(2099.008279326559, 6);
+  });
+
+  it('filter c1 (decision U2): symmetric, DC gain 1, -6 dB at lowpassHz, ripple <= 0.5 dB on |f| <= 950 Hz, >= 46 dB for |f| >= 1380 Hz', () => {
+    let worstRipple = 0;
+    let worstStop = Infinity;
+    let worstCutoffDev = 0;
+    for (const fs of ALL_TEST_RATES) {
+      const h = designLowpass(fs, FWD.lowpassHz, 400);
+      const L = h.length;
+      let sum = 0;
+      let asym = 0;
+      for (let k = 0; k < L; k++) {
+        sum += h[k];
+        asym = Math.max(asym, Math.abs(h[k] - h[L - 1 - k]));
+      }
+      expect(Math.abs(sum - 1), `fs=${fs}`).toBeLessThan(1e-12);
+      expect(asym, `fs=${fs}`).toBeLessThan(1e-15);
+      // The -6 dB point is lowpassHz (reading c1): |H(fc)| = 1/2 within 0.1 dB.
+      const cutoffDb = 20 * Math.log10(lowpassMagnitude(h, fs, FWD.lowpassHz));
+      worstCutoffDev = Math.max(worstCutoffDev, Math.abs(cutoffDb - 20 * Math.log10(0.5)));
+      for (let f = 0; f <= 950; f += 5) {
+        worstRipple = Math.max(worstRipple, Math.abs(20 * Math.log10(lowpassMagnitude(h, fs, f))));
+      }
+      for (let f = 1380; f <= fs / 2; f += 4) {
+        worstStop = Math.min(worstStop, -20 * Math.log10(lowpassMagnitude(h, fs, f)));
+      }
+    }
+    console.log(
+      `filter c1: worst ripple ${worstRipple.toFixed(3)} dB, worst stopband ${worstStop.toFixed(2)} dB, ` +
+        `worst |H(1100 Hz)| deviation from -6.02 dB ${worstCutoffDev.toFixed(4)} dB`,
+    );
+    expect(worstCutoffDev).toBeLessThanOrEqual(0.1);
+    expect(worstRipple).toBeLessThanOrEqual(0.5);
+    expect(worstStop).toBeGreaterThanOrEqual(46);
+  });
+
+  it('filter response rejects the backward tones 390/420/450 Hz and 50 Hz mains by >= 40 dB (requirement 5.1, T5-2)', () => {
+    const bw = CHANNELS.backward;
+    let worst = Infinity;
+    for (const fs of ALL_TEST_RATES) {
+      const h = designLowpass(fs, FWD.lowpassHz, 400);
+      for (const f of [bw.markHz, bw.mixHz, bw.spaceHz, 50]) {
+        // A real tone at f gives two products after the mixer: f - mixHz and -(f + mixHz).
+        for (const g of [FWD.mixHz - f, FWD.mixHz + f]) {
+          worst = Math.min(worst, -20 * Math.log10(lowpassMagnitude(h, fs, g)));
+        }
+      }
+    }
+    console.log(`filter rejection of 390/420/450/50 Hz: worst ${worst.toFixed(2)} dB`);
+    expect(worst).toBeGreaterThanOrEqual(40);
+  });
+
+  it('ComplexDecimatingFir equals a direct convolution, keeps every D-th output, and resets', () => {
+    expect(() => new ComplexDecimatingFir(new Float64Array(0), 1)).toThrow(RangeError);
+    expect(() => new ComplexDecimatingFir(new Float64Array(3), 0)).toThrow(RangeError);
+    expect(() => new ComplexDecimatingFir(new Float64Array(3), 1.5)).toThrow(RangeError);
+    const arbVal = fc.double({ min: -1, max: 1, noNaN: true });
+    fc.assert(
+      fc.property(
+        fc.array(arbVal, { minLength: 1, maxLength: 40 }),
+        fc.integer({ min: 1, max: 7 }),
+        fc.array(fc.tuple(arbVal, arbVal), { maxLength: 200 }),
+        (tapsArr, D, input) => {
+          const h = Float64Array.from(tapsArr);
+          const fir = new ComplexDecimatingFir(h, D);
+          const run = (): [number, number, number][] => {
+            const outs: [number, number, number][] = [];
+            input.forEach(([re, im], j) => {
+              const ready = fir.write(re, im);
+              expect(ready).toBe((j + 1) % D === 0);
+              if (ready) outs.push([j, fir.outRe, fir.outIm]);
+            });
+            return outs;
+          };
+          const outs = run();
+          for (const [j, yr, yi] of outs) {
+            let rr = 0;
+            let ri = 0;
+            for (let k = 0; k < h.length && j - k >= 0; k++) {
+              rr += h[k] * input[j - k][0];
+              ri += h[k] * input[j - k][1];
+            }
+            expect(Math.abs(yr - rr)).toBeLessThanOrEqual(1e-12);
+            expect(Math.abs(yi - ri)).toBeLessThanOrEqual(1e-12);
+          }
+          fir.reset();
+          expect(run()).toEqual(outs);
+        },
+      ),
+      { numRuns: NUM_RUNS },
+    );
+  });
+});
+
+describe('v23-modem task 5.2 and 5.3: discriminator', () => {
+  it('createDiscriminator: typed errors, non-integer rates accepted, parameterised by channel (T5-4)', () => {
+    for (const fs of [7999, 96001, Number.NaN, Infinity, -48000]) {
+      expect(createDiscriminator(fs)).toEqual({ ok: false, error: { kind: 'bad-sample-rate', sampleRate: fs } });
+    }
+    expect(createDiscriminator(48000, 'sideways' as never)).toMatchObject({
+      ok: false,
+      error: { kind: 'bad-option', option: 'channel' },
+    });
+    for (const fs of [8000, 44100.3, 96000]) expect(createDiscriminator(fs).ok).toBe(true);
+    // Backward: construction only; its behaviour is verified with task 14.
+    const b = createDiscriminator(48000, 'backward');
+    expect(b.ok).toBe(true);
+    if (!b.ok) return;
+    expect(b.value.channel).toBe('backward');
+    expect(b.value.decimation).toBe(24);
+    expect(b.value.taps.length).toBe(hammingTapCount(48000, DISCRIMINATOR.backward.transitionHz));
+  });
+
+  it('timing: the estimate computed at input n is dated n - (L - 1)/2 - D/2; one estimate per D inputs from the second kept output', () => {
+    for (const fs of ALL_TEST_RATES) {
+      const d = makeDisc(fs);
+      const L = d.taps.length;
+      const D = d.decimation;
+      const N = L + 10 * D + 3;
+      const out = d.push(new Float32Array(N));
+      expect(out.count, `fs=${fs}`).toBe(Math.floor(N / D) - 1);
+      expect(out.firstTimeSamples, `fs=${fs}`).toBe(2 * D - 1 - (L - 1) / 2 - D / 2);
+      expect(d.settledTimeSamples).toBe(L - 1 + D - (L - 1) / 2 - D / 2);
+    }
+  });
+
+  it('requirement 5.2: RMS frequency error <= 15 Hz on clean tones 1000..2500 Hz, integer and non-integer rates', () => {
+    let worstSweep = 0;
+    for (const fs of ALL_TEST_RATES) {
+      for (let f = 1000; f <= 2500; f += 100) {
+        const d = makeDisc(fs);
+        const x = synth(d.taps.length + 4 * d.decimation + Math.round(0.05 * fs), 0.5, toneCycles(fs, f, 0.3));
+        worstSweep = Math.max(worstSweep, settledRmsHz(d, runDisc(d, x), f));
+      }
+    }
+    let worstProp = 0;
+    fc.assert(
+      fc.property(
+        arbDiscRate,
+        fc.double({ min: 1000, max: 2500, noNaN: true }),
+        fc.double({ min: 0.01, max: 1, noNaN: true }),
+        fc.double({ min: 0, max: 1, noNaN: true, maxExcluded: true }),
+        (fs, f, amp, phase0) => {
+          const d = makeDisc(fs);
+          const x = synth(d.taps.length + 4 * d.decimation + Math.round(0.03 * fs), amp, toneCycles(fs, f, phase0));
+          const rms = settledRmsHz(d, runDisc(d, x), f);
+          worstProp = Math.max(worstProp, rms);
+          expect(rms).toBeLessThanOrEqual(15);
+        },
+      ),
+      { numRuns: DISC_RUNS },
+    );
+    console.log(`discriminator RMS error: sweep worst ${worstSweep.toFixed(3)} Hz, property worst ${worstProp.toFixed(3)} Hz`);
+    expect(worstSweep).toBeLessThanOrEqual(15);
+  });
+
+  it('requirement 5.1: tones at 390, 420, 450 and 50 Hz come out >= 40 dB below a 1300 Hz tone of the same amplitude', () => {
+    const bw = CHANNELS.backward;
+    let worst = Infinity;
+    for (const fs of ALL_TEST_RATES) {
+      const n = hammingTapCount(fs, 400) + 6 * 8 + Math.round(0.1 * fs);
+      const power = (f: number): number => {
+        const d = makeDisc(fs);
+        return settledPower(d, runDisc(d, synth(n, 0.5, toneCycles(fs, f, 0.1))));
+      };
+      const ref = power(FWD.markHz);
+      for (const f of [bw.markHz, bw.mixHz, bw.spaceHz, 50]) worst = Math.min(worst, 10 * Math.log10(ref / power(f)));
+    }
+    console.log(`discriminator rejection of 390/420/450/50 Hz vs 1300 Hz: worst ${worst.toFixed(2)} dB`);
+    expect(worst).toBeGreaterThanOrEqual(40);
+  });
+
+  it('requirement 5.3: a phase-continuous step 1300 <-> 2100 Hz is located within 1 input sample (D/2 dating)', () => {
+    const stepError = (fs: number, up: boolean, tauFrac: number, extra: number): number => {
+      const d = makeDisc(fs);
+      const L = d.taps.length;
+      const D = d.decimation;
+      const [f1, f2] = up ? [FWD.markHz, FWD.spaceHz] : [FWD.spaceHz, FWD.markHz];
+      const tau = L + 2 * D + extra + tauFrac; // true step time, in input samples
+      const cycles = (i: number): number => (i < tau ? f1 * i : f1 * tau + f2 * (i - tau)) / fs + 0.17;
+      const est = runDisc(d, synth(Math.ceil(tau) + L + 4 * D + 50, 0.5, cycles));
+      const thr = FWD.thresholdHz;
+      for (let m = 1; m < est.t.length; m++) {
+        if (est.t[m - 1] < d.settledTimeSamples) continue;
+        const a = est.f[m - 1] - thr;
+        const b = est.f[m] - thr;
+        if ((up && a < 0 && b >= 0) || (!up && a > 0 && b <= 0)) {
+          const cross = est.t[m - 1] + (a / (a - b)) * (est.t[m] - est.t[m - 1]);
+          return cross - tau;
+        }
+      }
+      return Infinity;
+    };
+    const perRate: string[] = [];
+    let worst = 0;
+    for (const fs of ALL_TEST_RATES) {
+      let w = 0;
+      for (const up of [true, false]) {
+        for (const frac of [0, 0.25, 0.5, 0.75]) {
+          for (const extra of [0, 1, 2]) w = Math.max(w, Math.abs(stepError(fs, up, frac, extra)));
+        }
+      }
+      perRate.push(`${fs}: ${w.toFixed(3)}`);
+      worst = Math.max(worst, w);
+    }
+    fc.assert(
+      fc.property(
+        arbDiscRate,
+        fc.boolean(),
+        fc.double({ min: 0, max: 1, noNaN: true, maxExcluded: true }),
+        fc.integer({ min: 0, max: 200 }),
+        (fs, up, frac, extra) => {
+          const e = Math.abs(stepError(fs, up, frac, extra));
+          worst = Math.max(worst, e);
+          expect(e).toBeLessThanOrEqual(1);
+        },
+      ),
+      { numRuns: DISC_RUNS },
+    );
+    console.log(`step alignment |error| (input samples) per rate: ${perRate.join(', ')}; overall worst ${worst.toFixed(3)}`);
+    expect(worst).toBeLessThanOrEqual(1);
+  });
+
+  it('chunk invariance: any partition gives bit-identical estimates on one continuous m * D time grid', () => {
+    fc.assert(
+      fc.property(
+        arbDiscRate,
+        arbBytes7(0, 6),
+        fc.array(fc.integer({ min: 0, max: 300 }), { maxLength: 40 }),
+        (fs, bytes, lens) => {
+          const m = modulate(bytes, { sampleRate: fs, leadIdleMs: 20, tailIdleMs: 10 });
+          expect(m.ok).toBe(true);
+          if (!m.ok) return;
+          const whole = runDisc(makeDisc(fs), m.value);
+          const parts = runDisc(makeDisc(fs), m.value, lens);
+          expect(whole.consistent).toBe(true);
+          expect(parts.consistent).toBe(true);
+          expect(parts.t).toEqual(whole.t);
+          expect(parts.f).toEqual(whole.f);
+          expect(parts.re).toEqual(whole.re);
+          expect(parts.im).toEqual(whole.im);
+        },
+      ),
+      { numRuns: DISC_RUNS },
+    );
+  });
+
+  it('mixer phase: error <= 1e-7 cycle up to 24 h and <= 1e-6 up to 30 days at every rate, continuous from sample to sample (long-duration drift)', () => {
+    // Bound: the only rounding is (mixHz * n) / fs, so the error is <= ulp(mixHz * t) / 2 cycles,
+    // independent of fs: 1.5e-8 at 24 h, 2.4e-7 at 30 days.
+    let worst24h = 0;
+    let worst30d = 0;
+    let worstStep24h = 0;
+    let worstStep = 0;
+    for (const fs of ALL_TEST_RATES) {
+      const day = Math.floor(86400 * fs);
+      const ns = [0, 1, 2, 3, 1000, 123456789, day - 1, day, 7 * day, 30 * day];
+      for (let k = 0; k < 20; k++) ns.push(Math.floor(((k + 1) / 20) * 30 * day));
+      const step = (FWD.mixHz / fs) % 1;
+      for (const n of ns) {
+        const err = circularDiff(mixerPhaseCycles(n, FWD.mixHz, fs), exactMixerPhase(n, FWD.mixHz, fs));
+        if (n <= day) worst24h = Math.max(worst24h, err);
+        worst30d = Math.max(worst30d, err);
+        // Continuity: consecutive phases differ by mixHz / fs cycles (mod 1).
+        const inc = mixerPhaseCycles(n + 1, FWD.mixHz, fs) - mixerPhaseCycles(n, FWD.mixHz, fs);
+        const stepErr = circularDiff(inc, step);
+        if (n <= day) worstStep24h = Math.max(worstStep24h, stepErr);
+        worstStep = Math.max(worstStep, stepErr);
+      }
+    }
+    console.log(
+      `mixer phase error vs exact BigInt: worst ${worst24h.toExponential(2)} cycles up to 24 h, ` +
+        `${worst30d.toExponential(2)} up to 30 days; worst sample-to-sample step error ` +
+        `${worstStep24h.toExponential(2)} (24 h), ${worstStep.toExponential(2)} (30 days) cycles`,
+    );
+    expect(worst24h).toBeLessThanOrEqual(1e-7);
+    expect(worstStep24h).toBeLessThanOrEqual(1e-7);
+    expect(worst30d).toBeLessThanOrEqual(1e-6);
+    expect(worstStep).toBeLessThanOrEqual(1e-6);
+  });
+
+  it('long run: no frequency drift on a mark tone streamed in chunks at 48 kHz (10 s fast, 120 s slow)', () => {
+    const fs = 48000;
+    const seconds = isSlowTestsEnabled() ? 120 : 10;
+    const d = makeDisc(fs);
+    const chunkLen = 4799;
+    const chunk = new Float32Array(chunkLen);
+    // Exact integer phase: (markHz * i) mod fs, so the reference itself cannot drift.
+    let i = 0;
+    let sumFirst = 0;
+    let nFirst = 0;
+    let sumLast = 0;
+    let nLast = 0;
+    let se = 0;
+    let nAll = 0;
+    const total = seconds * fs;
+    while (i < total) {
+      const len = Math.min(chunkLen, total - i);
+      for (let k = 0; k < len; k++) chunk[k] = 0.5 * Math.sin((2 * Math.PI * ((FWD.markHz * (i + k)) % fs)) / fs);
+      const out = d.push(chunk.subarray(0, len));
+      for (let m = 0; m < out.count; m++) {
+        const t = out.firstTimeSamples + m * d.decimation;
+        if (t < d.settledTimeSamples) continue;
+        const f = out.freqHz[m];
+        se += (f - FWD.markHz) ** 2;
+        nAll++;
+        if (t < 2 * fs) {
+          sumFirst += f;
+          nFirst++;
+        } else if (t >= total - 2 * fs) {
+          sumLast += f;
+          nLast++;
+        }
+      }
+      i += len;
+    }
+    const drift = sumLast / nLast - sumFirst / nFirst;
+    const rms = Math.sqrt(se / nAll);
+    console.log(`long run ${seconds} s: mean f drift (last 2 s - first 2 s) = ${drift.toExponential(2)} Hz, RMS ${rms.toFixed(4)} Hz`);
+    expect(Math.abs(drift)).toBeLessThanOrEqual(0.01);
+    expect(rms).toBeLessThanOrEqual(15);
+  });
+
+  it('non-finite samples become 0 and are counted (T5-5); reset restores the initial state; silence gives mixHz', () => {
+    const fs = 22050;
+    const d = makeDisc(fs);
+    const n = d.taps.length + 400;
+    const clean = synth(n, 0.5, toneCycles(fs, FWD.markHz, 0));
+    const dirty = clean.slice();
+    const zeroed = clean.slice();
+    const bad = [5, 17, 200, 201, n - 1];
+    const values = [Number.NaN, Infinity, -Infinity, Number.NaN, Infinity];
+    bad.forEach((p, k) => {
+      dirty[p] = values[k];
+      zeroed[p] = 0;
+    });
+    const a = runDisc(d, dirty, [7, 100, 1]);
+    expect(d.nonFiniteCount).toBe(bad.length);
+    const b = runDisc(makeDisc(fs), zeroed);
+    expect(a.f).toEqual(b.f);
+    expect(a.re).toEqual(b.re);
+    expect(a.f.every(Number.isFinite)).toBe(true);
+    d.reset();
+    expect(d.nonFiniteCount).toBe(0);
+    const c = runDisc(d, zeroed);
+    expect(c).toEqual(b);
+    const silence = runDisc(makeDisc(fs), new Float32Array(n));
+    expect(silence.f.every((f) => f === FWD.mixHz)).toBe(true);
+    expect(silence.re.every((v) => v === 0) && silence.im.every((v) => v === 0)).toBe(true);
   });
 });

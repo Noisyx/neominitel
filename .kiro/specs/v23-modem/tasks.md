@@ -26,10 +26,10 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - [x] 4.2 Property test M9 and malformed-header unit tests.
   - _Requirements: 4.1-4.3_
 
-- [ ] 5. Discriminator `[MVP]`
-  - [ ] 5.1 FIR design, streaming FIR with saved state, polyphase decimation.
-  - [ ] 5.2 Complex mixer, phase-difference frequency, group-delay compensation.
-  - [ ] 5.3 Tests: tone accuracy ≤ 15 Hz RMS, rejection of 420 Hz and 50 Hz ≥ 40 dB, all sample rates.
+- [x] 5. Discriminator `[MVP]`
+  - [x] 5.1 FIR design, streaming FIR with saved state, polyphase decimation.
+  - [x] 5.2 Complex mixer, phase-difference frequency, group-delay compensation.
+  - [x] 5.3 Tests: tone accuracy ≤ 15 Hz RMS, rejection of 420 Hz and 50 Hz ≥ 40 dB, all sample rates.
   - _Requirements: 5.1-5.4_
 
 - [ ] 6. UART and fixed threshold `[MVP]`

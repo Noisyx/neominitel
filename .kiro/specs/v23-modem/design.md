@@ -154,11 +154,15 @@ Added with task 4 (the first draft named only `writeWav` / `readWav` and the `wa
 - `bitErrors` inverts chosen line bits after framing. It exists only for property tests (parity and framing errors) and is never set by the app. Indices count line bits from the first start bit (index 0), inter-frame idle bits included; the leading and trailing idle are not indexed. A non-integer or out-of-range index returns `bad-option`; a repeated index inverts its bit once.
 
 ### Discriminator
-1. Complex mix: z[n] = x[n]·e^(−j2π·mixHz·n/fs).
-2. Windowed-sinc low-pass (Hamming), cutoff `lowpassHz`, transition 400 Hz (forward), 60 Hz (backward). The number of taps is derived from fs.
-3. Decimate by D = max(1, floor(fs / 16000)) for forward (≈ 13 samples per bit at 48 kHz) and D = max(1, floor(fs / 2000)) for backward. Only every D-th output is computed (polyphase), so the cost is divided by D.
-4. Frequency: f[m] = mixHz + arg(z[m]·conj(z[m−1]))·fs_d / 2π.
-5. Group delay (taps − 1)/2 input samples is subtracted from every reported time.
+`src/modem/filters.ts` and `src/modem/discriminator.ts` are internal to the core (not exported by `index.ts`, decision T5-6). The transition widths and decimated rates live in `DISCRIMINATOR` in `v23.ts`, outside `ChannelSpec` (decision T5-3).
+0. A NaN or infinite input sample is replaced by 0 and counted here, before the mixer (decision T5-5); the demodulator reports the count as `diag.nonFiniteCount`.
+1. Complex mix: z[n] = x[n]·e^(−j2π·mixHz·n/fs), where n is the global input index since `reset()`. The phase is computed in closed form, frac(mixHz·n/fs), never accumulated, so it does not depend on chunk boundaries. Its only rounding is the division: at most ½ ulp(mixHz·t) cycles, i.e. 1.5·10⁻⁸ cycle after 24 h at any rate (measured in the tests against an exact BigInt reference).
+2. Windowed-sinc low-pass (Hamming) whose **−6 dB point is `lowpassHz`** (reading c1, decision U2, selected by experiment E1): h[k] = 2f_c·sinc(2f_c(k − M))·w[k], f_c = `lowpassHz`/fs, M = (L − 1)/2, w[k] = 0.54 − 0.46·cos(2πk/(L − 1)), normalised to DC gain 1. Transition 400 Hz (forward), 60 Hz (backward), centred on `lowpassHz`. L = ⌈3.3·fs/transition⌉, made odd (397 taps at 48 kHz). Reading 1100 Hz as the passband edge (c3) was rejected: it leaves only 14.7 dB at 420 Hz. The forward filter gives ≥ 52.7 dB on the backward tones 390, 420 and 450 Hz and on 50 Hz at every rate; requirement 5.1 is checked on these tones, not on the whole 300 to 540 Hz band (decision T5-2: the band edge near 540 Hz gets only 31.6 dB).
+3. Decimate by D = max(1, floor(fs / 16000)) for forward (≈ 13 samples per bit at 48 kHz) and D = max(1, floor(fs / 2000)) for backward. Only every D-th output is computed (polyphase), so the cost is divided by D. Input j produces an output when j + 1 is a multiple of D.
+4. Frequency: f[m] = mixHz + arg(z[m]·conj(z[m−1]))·fs_d / 2π, from the second kept output on. Everything is computed in double precision; only the returned arrays are `Float32Array`. Silence (z = 0) gives f = mixHz.
+5. Time compensation: an estimate computed at input index n is dated **n − (L − 1)/2 − D/2** input samples. The (L − 1)/2 term is the filter group delay. The −D/2 term dates a phase difference at the midpoint of its two samples. Without it, the step-alignment error measured by E2 reaches 1.12 samples at 48 kHz and 2.77 at 96 kHz; with it, requirement 5.3 holds (≤ 0.47 sample in E2, ≤ 0.54 in the task 5 tests including non-integer rates). Estimates dated before (L − 1 + D) − (L − 1)/2 − D/2 still contain the filter's zero history (warm-up).
+   - Clarification recorded per AGENTS.md rule 7: the first draft subtracted only the group delay; the −D/2 term is required by requirement 5.3. Signatures and properties are unchanged.
+6. `flush()` (feeding the filter tail) is defined with the streaming demodulator in task 7 (decision T5-7).
 
 ### Threshold
 - Soft value: s = (f − θ) / ((spaceHz − markHz)/2). s < 0 is mark (1), s > 0 is space (0). Confidence is |s|.
