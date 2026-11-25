@@ -45,30 +45,30 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - [x] 7.4 Property test M5.
   - _Requirements: 3.3, 8.1-8.4_
 
-- [ ] 8. Adaptive threshold `[MVP]`
-  - [ ] 8.1 Decision-directed two-means, live mode switch.
-  - [ ] 8.2 Property test M7. Non-regression test: the fixed-threshold path is unchanged after task 8. From this task, `threshold` defaults to `'adaptive'`.
+- [x] 8. Adaptive threshold `[MVP]`
+  - [x] 8.1 Decision-directed two-means, live mode switch.
+  - [x] 8.2 Property test M7. Non-regression test: the fixed-threshold path is unchanged after task 8. From this task, `threshold` defaults to `'adaptive'`.
   - _Requirements: 7.1-7.4_
 
-- [ ] 9. Line simulator `[MVP]`
-  - [ ] 9.1 AWGN by Eb/N0 or SNR, SSB frequency offset (Hilbert transform), clock offset (resample), 50 Hz hum, bursts.
-  - [ ] 9.2 Determinism test (same seed → identical output).
+- [x] 9. Line simulator `[MVP]`
+  - [x] 9.1 AWGN by Eb/N0 or SNR, SSB frequency offset (Hilbert transform), clock offset (resample), 50 Hz hum, bursts.
+  - [x] 9.2 Determinism test (same seed → identical output).
   - _Requirements: 11.1-11.3_
 
-- [ ] 10. Quality and BER `[MVP]`
-  - [ ] 10.1 M2M4 SNR estimator, 3 kHz normalization, Eb/N0, parity error rate.
-  - [ ] 10.2 PN9 generator (`pn9Frames`), self-synchronizing `BerCounter`, `wilsonInterval` and its `wilson95` convenience wrapper.
-  - [ ] 10.3 Property tests M10, M11, M6.
+- [x] 10. Quality and BER `[MVP]`
+  - [x] 10.1 M2M4 SNR estimator, 3 kHz normalization, Eb/N0, parity error rate.
+  - [x] 10.2 PN9 generator (`pn9Frames`), self-synchronizing `BerCounter`, `wilsonInterval` and its `wilson95` convenience wrapper.
+  - [x] 10.3 Property tests M10, M11, M6. (M6 at its calibrated Eb/N0 of 16.5 dB, `docs/calibration.md` "M6".)
   - _Requirements: 9.1-9.4, 10.1-10.3_
 
-- [ ] 11. Theory curves `[MVP]` (mathematician)
-  - [ ] 11.1 Orthogonal reference, Marcum Q formula with ρ for h = 2/3, write derivations in `docs/math.md`.
-  - [ ] 11.2 `scripts/montecarlo-ber.ts` producing curve 3 with intervals, saved as `public/data/ber-curve3.json` for the app.
-  - [ ] 11.3 Property test M12.
+- [x] 11. Theory curves `[MVP]` (mathematician)
+  - [x] 11.1 Orthogonal reference, Marcum Q formula with ρ for h = 2/3, write derivations in `docs/math.md`.
+  - [x] 11.2 `scripts/montecarlo-ber.ts` producing curve 3 with intervals, saved as `public/data/ber-curve3.json` for the app.
+  - [x] 11.3 Property test M12.
   - _Requirements: 10.4_
 
 - [ ] 12. Calibration `[MVP]`
-  - Run `scripts/calibrate-modem.ts`, set the M6 Eb/N0 target and the connection-sequence durations, record everything in `docs/calibration.md`.
+  - Run `scripts/calibrate-modem.ts`, set the M6 Eb/N0 target and the connection-sequence durations, record everything in `docs/calibration.md`. (M6 part done early, with task 11: 16.5 dB. Connection-sequence durations still to do.)
   - _Requirements: 3.2, 9.3_
 
 - [ ] 13. Performance `[MVP]`

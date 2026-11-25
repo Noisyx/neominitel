@@ -77,6 +77,46 @@ export const CARRIER = {
   offHoldMs: 50,
 } as const;
 
+/**
+ * Quality estimation (design.md "Quality (M2M4 estimator)", task 10). DSP choices of the receiver,
+ * outside ChannelSpec (same reason as DISCRIMINATOR).
+ */
+export const QUALITY = {
+  /** A `quality` event at every absolute boundary of this period while the carrier is on (req. 9.1). */
+  intervalMs: 100,
+  /** The moments are averaged over the carrier-on estimates of the last averageMs. */
+  averageMs: 1000,
+  /** No estimate from less than minMs of carrier-on estimates. */
+  minMs: 50,
+  /** Running parity error rate over the last frames (requirement 9.4). */
+  parityFrames: 100,
+  /**
+   * Envelope kurtosis k_s = E|s|^4 / (E|s|^2)^2 of the forward FSK after the discriminator
+   * low-pass, measured in task 10 on PN9 traffic: 1.0104 to 1.0108 at 8, 16, 44.1 and 48 kHz.
+   */
+  forwardEnvelopeKurtosis: 1.0105,
+} as const;
+
+/** One-sided reference band of γ_3k, the default SNR (docs/math.md D5). */
+export const SNR_REFERENCE_BAND_HZ = 3000;
+
+/**
+ * Line simulator design choices (design.md "Line simulator API", task 9). DSP choices of the test
+ * channel, outside ChannelSpec (same reason as DISCRIMINATOR).
+ */
+export const LINE_SIMULATOR = {
+  /** Transition width of the Hamming-windowed Hilbert FIR (SSB frequency offset). */
+  hilbertTransitionHz: 300,
+  /** Half-width, in input samples, of the windowed-sinc kernel of the clock resampler. */
+  resamplerHalfWidth: 16,
+  /** Largest accepted |clockPpm| (10 %). */
+  maxClockPpm: 100_000,
+  /** Largest accepted number of hum harmonics. */
+  maxHarmonics: 20,
+  /** Largest accepted burst duration. */
+  maxBurstMs: 10_000,
+} as const;
+
 export const ANSWER_TONE = {
   /** Goertzel block length. `connect` needs durationMs / blockMs consecutive tone blocks. */
   blockMs: 20,

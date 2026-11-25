@@ -1,8 +1,8 @@
-// UART: soft values -> characters (requirements 6.1 to 6.6, design.md "UART").
+// UART: frequency estimates -> characters (requirements 6.1 to 6.6, design.md "UART").
 // Internal to src/modem (decision T5-6): the streaming demodulator (task 7) wraps it.
 import type { Discriminator, DiscriminatorOutput } from './discriminator';
 import { lineBitsToByte } from './frame';
-import { fixedThresholdHz, softValue } from './threshold';
+import { createThresholdSource, softValue, type ThresholdSource, type ThresholdState } from './threshold';
 import { CHANNELS, FRAME } from './v23';
 
 /** One received frame. */
@@ -19,6 +19,8 @@ export interface UartChar {
   atSample: number;
   /** Smallest |mean of s| over the 10 bit windows, start bit included (decision T6-5). */
   minConfidence: number;
+  /** Threshold state right after this frame's decision-directed update (task 8, for diag). */
+  threshold: ThresholdState;
 }
 
 export interface Uart {
@@ -43,6 +45,8 @@ const WINDOW_END = 0.75;
  */
 const RESUME_AFTER_VALID_STOP = FRAME.bitsPerFrame - 1 + 0.5;
 const RESUME_AFTER_FRAMING_ERROR = FRAME.bitsPerFrame - 1 + WINDOW_END;
+/** Adaptive threshold: a bit updates its tone estimate when it is the centre of 2 * RUN_HALF + 1 equal bits. */
+const RUN_HALF = 2;
 
 type Mode = 'hunt' | 'frame';
 
@@ -64,22 +68,29 @@ type Mode = 'hunt' | 'frame';
  *   The hunt then resumes at t_e + 9.5 T after a valid stop bit, or at t_e + 9.75 T after a
  *   framing error.
  *
+ * The threshold comes from `source` (default: a fixed-threshold source). It is read whenever a
+ * soft value is computed, and an adaptive source is updated after each decided frame (task 8).
+ *
  * The result depends only on the sequence of estimates, never on how they are split into blocks.
  */
-export function createUart(d: Pick<Discriminator, 'sampleRate' | 'channel' | 'decimation' | 'settledTimeSamples'>): Uart {
+export function createUart(
+  d: Pick<Discriminator, 'sampleRate' | 'channel' | 'decimation' | 'settledTimeSamples'>,
+  source: ThresholdSource = createThresholdSource(CHANNELS[d.channel], 'fixed'),
+): Uart {
   const spec = CHANNELS[d.channel];
-  const thresholdHz = fixedThresholdHz(spec);
   const bitPeriod = d.sampleRate / spec.baud; // input samples
   const D = d.decimation;
   const Tb = bitPeriod / D; // bit period in estimates
   const frameBits = FRAME.bitsPerFrame;
   const lastWindowEnd = (frameBits - 1 + WINDOW_END) * Tb; // 9.75 T, relative to the edge
-  // Ring buffer of settled soft values, indexed by the global settled index m. It holds at least
+  // Ring buffer of settled frequencies, indexed by the global settled index m. It holds at least
   // one frame plus margins: in hunt mode only the previous estimate is needed, and in frame mode
   // everything from the edge to the end of the stop window.
   const cap = Math.ceil(frameBits * Tb) + 2 * Math.ceil(Tb) + 16;
   const ring = new Float64Array(cap);
   const bits = new Uint8Array(frameBits);
+  const means = new Float64Array(frameBits);
+  const halfGap = (spec.spaceHz - spec.markHz) / 2;
 
   let tS = NaN; // time of settled estimate 0, input samples
   let count = 0; // number of settled estimates received
@@ -91,7 +102,10 @@ export function createUart(d: Pick<Discriminator, 'sampleRate' | 'channel' | 'de
   let startChecked = false;
   let falseStarts = 0;
 
-  const s = (m: number): number => ring[m % cap];
+  // The ring holds frequencies; the soft value uses the threshold in force when it is read, so an
+  // adaptive threshold updated after a frame applies to the following decisions. With the fixed
+  // threshold this is exactly softValue(f, 1700) per sample, as before (task 8 non-regression).
+  const s = (m: number): number => softValue(ring[m % cap], source.thresholdHz(), spec);
 
   /** Exact mean of the piecewise-linear s over [ua, ub] (indices, ub <= count - 1). */
   function windowMean(ua: number, ub: number): number {
@@ -111,10 +125,23 @@ export function createUart(d: Pick<Discriminator, 'sampleRate' | 'channel' | 'de
   /** Decides the 10 line bits (start included) and checks parity and framing with lineBitsToByte. */
   function emitFrame(out: UartChar[]): void {
     let minConfidence = Infinity;
+    const theta = source.thresholdHz();
     for (let i = 0; i < frameBits; i++) {
       const mean = windowMean(edge + (i + WINDOW_START) * Tb, edge + (i + WINDOW_END) * Tb);
       minConfidence = Math.min(minConfidence, Math.abs(mean));
       bits[i] = mean < 0 ? 1 : 0;
+      means[i] = mean;
+    }
+    // Decision-directed update (adaptive mode only), after the whole frame is decided: the mean
+    // frequency over a bit's window updates the estimate of the tone it was decided as, but only
+    // for the centre bit of a run of 2 * RUN_HALF + 1 = 5 equal bits inside the frame. Through the filter, a bit of
+    // the other tone pulls the window mean towards it (inter-symbol interference): updating on
+    // every bit biased the estimates by up to 66 Hz at +-400 Hz offset, and on runs of 3 by up to
+    // 22 Hz (task 8 measurements, design.md "Threshold").
+    for (let i = RUN_HALF; i < frameBits - RUN_HALF; i++) {
+      let run = true;
+      for (let k = i - RUN_HALF; k <= i + RUN_HALF && run; k++) run = bits[k] === bits[i];
+      if (run) source.observeBit(bits[i], theta + means[i] * halfGap);
     }
     const f = lineBitsToByte(bits);
     out.push({
@@ -123,6 +150,7 @@ export function createUart(d: Pick<Discriminator, 'sampleRate' | 'channel' | 'de
       framingOk: f.framingOk,
       atSample: tS + edge * D,
       minConfidence,
+      threshold: source.state(),
     });
     // Resume point (see RESUME_AFTER_*): the pair (k - 1, k) examined first contains that instant.
     const resume = f.framingOk ? RESUME_AFTER_VALID_STOP : RESUME_AFTER_FRAMING_ERROR;
@@ -189,7 +217,7 @@ export function createUart(d: Pick<Discriminator, 'sampleRate' | 'channel' | 'de
         const t = o.firstTimeSamples + j * D;
         if (t < d.settledTimeSamples) continue;
         if (count === 0) tS = t;
-        ring[count % cap] = softValue(o.freqHz[j], thresholdHz, spec);
+        ring[count % cap] = o.freqHz[j];
         count++;
         run(out);
       }
