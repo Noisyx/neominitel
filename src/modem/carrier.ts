@@ -77,7 +77,6 @@ export function createDetector(sampleRate: number, decimation: number, carrierOn
   const toneBlocksNeeded = Math.round(ANSWER_TONE.durationMs / ANSWER_TONE.blockMs);
   const omega = (2 * Math.PI * ANSWER_TONE_HZ) / sampleRate;
   const goertzelCoeff = 2 * Math.cos(omega);
-  const goertzelSin = Math.sin(omega);
 
   let carrierOn = false;
   let aboveRun = 0;
@@ -119,9 +118,12 @@ export function createDetector(sampleRate: number, decimation: number, carrierOn
   }
 
   function closeBlock(blockIndex: number, events: DetectorEvents): void {
-    const real = g1 - goertzelCoeff * g2;
-    const imag = g2 * goertzelSin;
-    const tonePower = (real * real + imag * imag) / (blockFilled * blockFilled);
+    // Goertzel: |X(f)|^2 = g1^2 + g2^2 - 2 cos(w) g1 g2. Power of the 2100 Hz component of a real
+    // block: 2 |X|^2 / N^2 (a sine of amplitude A gives A^2 / 2, its mean square). Task 8 fix: the
+    // first draft computed the real part as g1 - 2 cos(w) g2 instead of g1 - cos(w) g2 and
+    // normalised by N^2 instead of N^2 / 2, so connect was missed at 8 and 16 kHz.
+    const magSq = g1 * g1 + g2 * g2 - goertzelCoeff * g1 * g2;
+    const tonePower = (2 * magSq) / (blockFilled * blockFilled);
     const meanSquare = blockSumSq / blockFilled;
     const isTone =
       meanSquare > 0 &&

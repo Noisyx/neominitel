@@ -4,7 +4,7 @@
 // only createDemodulator is exported, from task 7 on (decision T7-8).
 import { createDetector } from './carrier';
 import { createDiscriminator, type DiscriminatorOutput } from './discriminator';
-import { fixedThresholdHz } from './threshold';
+import { ADAPTIVE_INIT_MS, createThresholdSource, type ThresholdMode, type ThresholdState } from './threshold';
 import type { DemodEvent, DemodOptions, ModemError, Result, StreamingDemodulator } from './types';
 import { createUart, type UartChar } from './uart';
 import { CARRIER, CHANNELS, FRAME } from './v23';
@@ -32,8 +32,8 @@ interface Sample {
  *
  * Validation (design.md "Factory" and "Threshold mode"): `bad-sample-rate` when sampleRate is not
  * finite or outside 8 000..96 000 Hz; `bad-option` for an unknown channel, for the backward
- * channel until task 14 (decision T7-7), for any threshold other than 'fixed' until task 8
- * (an omitted threshold included, no silent fallback), and for a non-finite carrierOnDbfs.
+ * channel until task 14 (decision T7-7), for a threshold other than 'fixed' or 'adaptive', and for
+ * a non-finite carrierOnDbfs. `threshold` defaults to 'adaptive' (task 8, design.md "Threshold");
  * `carrierOnDbfs` defaults to -45 under the D6 reference (decision T7-1).
  *
  * `push` runs the discriminator, the carrier and answer-tone detector, and the UART. The UART
@@ -60,7 +60,8 @@ interface Sample {
  * on, emits a final `diag` dated at the end of the input (unless the end is itself a 50 ms
  * boundary), releases every held event, and restarts the discriminator and the detectors. Time
  * continues from the last real sample, on the same absolute grids.
- * `push`, `flush` and `reset` never throw. `setThresholdMode` is a documented no-op until task 8.
+ * `push`, `flush` and `reset` never throw. `setThresholdMode` switches the mode live, keeping the
+ * UART position (requirement 7.4).
  */
 export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator, ModemError> {
   const channel = o?.channel ?? 'forward';
@@ -72,14 +73,13 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
       error: { kind: 'bad-option', option: 'channel', reason: 'the backward channel is not available before task 14' },
     };
   }
-  if (o.threshold !== 'fixed') {
+  // From task 8, threshold defaults to 'adaptive'; 'fixed' stays supported (design.md
+  // "Threshold mode"). Any other value is a bad option.
+  const initialMode: ThresholdMode = o.threshold ?? 'adaptive';
+  if (initialMode !== 'fixed' && initialMode !== 'adaptive') {
     return {
       ok: false,
-      error: {
-        kind: 'bad-option',
-        option: 'threshold',
-        reason: "before task 8, only threshold: 'fixed' is accepted (no silent fallback)",
-      },
+      error: { kind: 'bad-option', option: 'threshold', reason: "must be 'fixed' or 'adaptive'" },
     };
   }
   const carrierOnDbfs = o.carrierOnDbfs ?? CARRIER.onDbfs;
@@ -90,7 +90,9 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
   const d = disc.value;
   const spec = CHANNELS.forward;
   const detector = createDetector(d.sampleRate, d.decimation, carrierOnDbfs);
-  const uart = createUart(d);
+  const threshold = createThresholdSource(spec, initialMode);
+  const uart = createUart(d, threshold);
+  const initSamples = (ADAPTIVE_INIT_MS / 1000) * d.sampleRate;
   const diagEvery = Math.max(1, Math.round(DIAG_INTERVAL_S * d.sampleRate));
   const bitSamples = d.sampleRate / spec.baud;
   const decisionOffset = (FRAME.bitsPerFrame - 1 + 0.75) * bitSamples;
@@ -115,6 +117,47 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
   const frames: { decisionT: number; windows: [number, number][] }[] = [];
   const held: { e: DemodEvent; seq: number }[] = []; // events waiting for release
   let seq = 0;
+
+  // Adaptive threshold (task 8). After each carrier on, the mean frequency of the estimates dated
+  // in [onT, onT + 20 ms) initialises mu_mark (idle carrier is mark), in both modes, so a switch to
+  // adaptive can use it. In adaptive mode the UART starts only once that estimate exists; once
+  // started it is fed continuously, whatever the mode switches.
+  let initStart = NaN; // carrier-on time of the pending initialisation (NaN = none pending)
+  let initSum = 0;
+  let initCount = 0;
+  let uartStarted = false;
+  // Threshold states with the time they take effect, for diags (chunk-invariant reporting).
+  const stateLog: { t: number; s: ThresholdState }[] = [{ t: -Infinity, s: threshold.state() }];
+
+  function logState(t: number): void {
+    stateLog.push({ t, s: threshold.state() });
+  }
+
+  /** The threshold state in force just before time `at`. */
+  function stateBefore(at: number): ThresholdState {
+    let best = 0;
+    for (let i = 1; i < stateLog.length; i++) if (stateLog[i].t < at && stateLog[i].t >= stateLog[best].t) best = i;
+    return stateLog[best].s;
+  }
+
+  /** Drops the states superseded before `at` (keeps the one in force at `at`). */
+  function pruneStates(at: number): void {
+    let best = 0;
+    for (let i = 1; i < stateLog.length; i++) if (stateLog[i].t < at && stateLog[i].t >= stateLog[best].t) best = i;
+    const base = stateLog[best];
+    const rest = stateLog.filter((e, i) => i !== best && e.t >= at);
+    stateLog.length = 0;
+    stateLog.push({ t: -Infinity, s: base.s }, ...rest);
+  }
+
+  function clearThreshold(at: number): void {
+    threshold.clear();
+    initStart = NaN;
+    initSum = 0;
+    initCount = 0;
+    uartStarted = false;
+    logState(at);
+  }
 
   function hold(e: DemodEvent): void {
     held.push({ e, seq: seq++ });
@@ -155,6 +198,8 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
         windows.push([c.atSample + i * bitSamples, c.atSample + (i + 1) * bitSamples]);
       }
       frames.push({ decisionT: c.atSample + decisionOffset, windows });
+      // The frame's decision-directed update takes effect at its decision time.
+      stateLog.push({ t: c.atSample + decisionOffset, s: c.threshold });
       hold({
         type: 'char',
         value: c.value,
@@ -166,25 +211,50 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
     }
   }
 
-  /** Runs the UART on the samples dated before `limit`, but only while the carrier is on. */
+  /** Feeds a contiguous run of estimates to the UART. */
+  function pushToUart(slice: Sample[]): void {
+    if (slice.length === 0) return;
+    noteChars(
+      uart.push({
+        count: slice.length,
+        firstTimeSamples: slice[0].t,
+        freqHz: Float32Array.from(slice, (s) => s.f),
+        re: Float32Array.from(slice, (s) => s.re),
+        im: Float32Array.from(slice, (s) => s.im),
+      }),
+    );
+    slice.length = 0;
+  }
+
+  /**
+   * Runs the UART on the samples dated before `limit`, but only while the carrier is on, and
+   * completes the idle-carrier initialisation of the adaptive threshold. The UART always processes
+   * the estimates before the initialisation point first, so the threshold switch happens at the same
+   * estimate whatever the chunk boundaries.
+   */
   function feedUart(samples: readonly Sample[], from: number, limit: number): number {
     let i = from;
     const slice: Sample[] = [];
     while (i < samples.length && samples[i].t < limit) {
-      if (carrierOn) slice.push(samples[i]);
+      const s = samples[i];
       i++;
+      if (!carrierOn) continue;
+      if (!Number.isNaN(initStart)) {
+        if (s.t < initStart + initSamples) {
+          initSum += s.f;
+          initCount++;
+        } else {
+          pushToUart(slice);
+          if (initCount > 0) threshold.initMark(initSum / initCount);
+          initStart = NaN;
+          logState(s.t);
+        }
+      }
+      if (!uartStarted && threshold.mode === 'adaptive' && !threshold.initialised) continue;
+      uartStarted = true;
+      slice.push(s);
     }
-    if (slice.length > 0) {
-      noteChars(
-        uart.push({
-          count: slice.length,
-          firstTimeSamples: slice[0].t,
-          freqHz: Float32Array.from(slice, (s) => s.f),
-          re: Float32Array.from(slice, (s) => s.re),
-          im: Float32Array.from(slice, (s) => s.im),
-        }),
-      );
-    }
+    pushToUart(slice);
     return i;
   }
 
@@ -208,10 +278,9 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
       freqHz: Float32Array.from(span, (s) => s.f),
       decimation: d.decimation,
       bitWindows: windowsDecidedIn(prevDiagAt, at),
-      thresholdHz: fixedThresholdHz(spec),
-      markHz: spec.markHz,
-      spaceHz: spec.spaceHz,
+      ...stateBefore(at),
     });
+    pruneStates(at);
     prevDiagAt = at;
   }
 
@@ -234,7 +303,14 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
     let cursor = 0;
     for (const ev of detected.carrier) {
       cursor = feedUart(samples, cursor, ev.atSample);
-      if (!ev.on) uart.reset();
+      if (!ev.on) {
+        uart.reset();
+        clearThreshold(ev.atSample); // a new transmission may have another offset
+      } else {
+        initStart = ev.atSample;
+        initSum = 0;
+        initCount = 0;
+      }
       carrierOn = ev.on;
       hold({ type: 'carrier', on: ev.on, atSample: atIndex(ev.atSample) });
     }
@@ -265,6 +341,7 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
           carrierOn = false;
           hold({ type: 'carrier', on: false, atSample: atIndex(off.atSample) });
         }
+        // The final diag reports the threshold state in force up to the end; it is cleared after.
         if (end > prevDiagAt) diagUpTo(end);
         const out = release(Infinity);
         // Restart on the absolute grids: time continues from the end of the real input.
@@ -276,6 +353,7 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
         carrierOn = false;
         buffer.length = 0;
         frames.length = 0;
+        clearThreshold(end);
         lastEstimateT = end;
         nextDiagAt = (Math.floor(end / diagEvery) + 1) * diagEvery;
         return out;
@@ -298,9 +376,21 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
       frames.length = 0;
       held.length = 0;
       seq = 0;
+      threshold.mode = initialMode;
+      threshold.clear();
+      initStart = NaN;
+      initSum = 0;
+      initCount = 0;
+      uartStarted = false;
+      stateLog.length = 0;
+      stateLog.push({ t: -Infinity, s: threshold.state() });
     },
-    setThresholdMode(_m: 'fixed' | 'adaptive'): void {
-      // Documented no-op before task 8: the mode stays 'fixed' (design.md "Threshold mode").
+    setThresholdMode(m: 'fixed' | 'adaptive'): void {
+      // Live switch (requirement 7.4): the UART keeps its position; the new threshold applies from
+      // the next estimate processed. Any other value is ignored (never throws).
+      if (m !== 'fixed' && m !== 'adaptive') return;
+      threshold.mode = m;
+      logState(lastEstimateT);
     },
   };
   return { ok: true, value: demod };

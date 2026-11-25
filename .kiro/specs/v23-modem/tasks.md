@@ -45,9 +45,9 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - [x] 7.4 Property test M5.
   - _Requirements: 3.3, 8.1-8.4_
 
-- [ ] 8. Adaptive threshold `[MVP]`
-  - [ ] 8.1 Decision-directed two-means, live mode switch.
-  - [ ] 8.2 Property test M7. Non-regression test: the fixed-threshold path is unchanged after task 8. From this task, `threshold` defaults to `'adaptive'`.
+- [x] 8. Adaptive threshold `[MVP]`
+  - [x] 8.1 Decision-directed two-means, live mode switch.
+  - [x] 8.2 Property test M7. Non-regression test: the fixed-threshold path is unchanged after task 8. From this task, `threshold` defaults to `'adaptive'`.
   - _Requirements: 7.1-7.4_
 
 - [ ] 9. Line simulator `[MVP]`

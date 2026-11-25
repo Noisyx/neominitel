@@ -25,7 +25,7 @@ export interface ConnectionSequenceOptions {
 export interface DemodOptions {
   sampleRate: number;
   channel?: ChannelId;
-  threshold?: 'fixed' | 'adaptive'; // see "Threshold mode" in design.md ('fixed' required until task 8)
+  threshold?: 'fixed' | 'adaptive'; // default 'adaptive' (from task 8, see "Threshold mode" in design.md)
   carrierOnDbfs?: number; // default -45, hysteresis 3 dB
 }
 

@@ -1,6 +1,7 @@
 // v23-modem tests (Role B). Correctness properties M1..M13 of .kiro/specs/v23-modem/design.md
 // are added here, one test named after each property, as their tasks land.
 // Fast mode by default; slow mode (`npm run test:slow`, NEOMINITEL_SLOW=1) runs more cases.
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -2364,6 +2365,64 @@ function toneMs(fs: number, fHz: number, ms: number, amp: number): Float32Array 
   return synth(Math.round((fs * ms) / 1000), amp, (i) => (fHz * i) / fs);
 }
 
+/** Phase-continuous FSK with every tone shifted by offsetHz (single-sideband style), closed form. */
+function fskOffset(bytes: Uint8Array, fs: number, offsetHz: number, o: { idle?: number; leadS?: number; tailS?: number; amp?: number } = {}): Float32Array {
+  const bits = lineBitsOf(bytes, o.idle ?? 0);
+  const lead = o.leadS ?? 0.1;
+  const tp = 1 / FWD.baud;
+  const cum = new Float64Array(bits.length + 1);
+  for (let k = 0; k < bits.length; k++) cum[k + 1] = cum[k] + (bits[k] === 0 ? tp : 0);
+  const end = lead + bits.length * tp;
+  const n = Math.round(fs * (end + (o.tailS ?? 0.05)));
+  return synth(n, o.amp ?? 0.5, (i) => {
+    const t = i / fs;
+    let sp: number;
+    if (t < lead) sp = 0;
+    else if (t >= end) sp = cum[bits.length];
+    else {
+      const k = Math.min(bits.length - 1, Math.floor((t - lead) / tp));
+      sp = cum[k] + (bits[k] === 0 ? t - (lead + k * tp) : 0);
+    }
+    return (FWD.markHz + offsetHz) * t + (FWD.spaceHz - FWD.markHz) * sp;
+  });
+}
+
+/** JSON of events with typed arrays as plain arrays (stable for hashing). */
+function eventsJson(events: readonly DemodEvent[]): string {
+  return JSON.stringify(events, (_k, v) => (v instanceof Float32Array ? Array.from(v) : v));
+}
+
+/**
+ * SHA-256 of the fixed-threshold event lists of four deterministic signals. The expected values
+ * in the task 8 non-regression test were produced by the task 7 code (commit 18a066b).
+ */
+function fixedGoldenDigests(): string[] {
+  // `connect` events are left out: they come from the answer-tone detector, not from the threshold
+  // path, and none of these signals produced one with the task 7 code (the digests were computed
+  // on the full lists). The Goertzel normalisation fixed in task 8 adds the connect of signal 3.
+  const bytes = Uint8Array.from(ascii('3615 NEOMINITEL'));
+  const signals: [number, Float32Array][] = [];
+  const m1 = modulate(bytes, { sampleRate: 48000 });
+  if (!m1.ok) throw new Error('modulate');
+  signals.push([48000, m1.value]);
+  const m2 = modulate(bytes, { sampleRate: 44100 });
+  if (!m2.ok) throw new Error('modulate');
+  signals.push([44100, awgn(m2.value, { sampleRate: 44100, snrDb: 20, bandwidthHz: 3000, signalAmplitude: 0.5, seed: 11 })]);
+  const seq = connectionSequence({ sampleRate: 16000 });
+  const m3 = modulate(bytes, { sampleRate: 16000 });
+  if (!m3.ok) throw new Error('modulate');
+  const s3 = new Float32Array(seq.length + m3.value.length);
+  s3.set(seq, 0);
+  s3.set(m3.value, seq.length);
+  signals.push([16000, s3]);
+  signals.push([22050, awgn(fskOffset(bytes, 22050, 200), { sampleRate: 22050, snrDb: 20, bandwidthHz: 3000, signalAmplitude: 0.5, seed: 12 })]);
+  return signals.map(([fs, x]) =>
+    createHash('sha256')
+      .update(eventsJson(demodEvents(x, fs).filter((e) => e.type !== 'connect')))
+      .digest('hex'),
+  );
+}
+
 describe('v23-modem task 7: streaming demodulator', () => {
   it('factory: bad-sample-rate, bad-option for threshold, channel and carrierOnDbfs; setThresholdMode is a no-op', () => {
     for (const fs of [7999, 96001, Number.NaN, Infinity]) {
@@ -2374,7 +2433,12 @@ describe('v23-modem task 7: streaming demodulator', () => {
     }
     // Non-integer rates are accepted (design.md "Factory").
     expect(createDemodulator({ sampleRate: 44100.3, threshold: 'fixed' }).ok).toBe(true);
-    for (const threshold of [undefined, 'adaptive' as const, 'auto' as never]) {
+    // From task 8 (design.md "Threshold mode"): an omitted threshold means 'adaptive', 'fixed' and
+    // 'adaptive' are accepted, anything else is a bad option.
+    for (const threshold of [undefined, 'adaptive' as const, 'fixed' as const]) {
+      expect(createDemodulator({ sampleRate: 48000, threshold }).ok).toBe(true);
+    }
+    for (const threshold of ['auto' as never, '' as never, 1 as never]) {
       const r = createDemodulator({ sampleRate: 48000, threshold });
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.error).toMatchObject({ kind: 'bad-option', option: 'threshold' });
@@ -2388,8 +2452,7 @@ describe('v23-modem task 7: streaming demodulator', () => {
     const ok = createDemodulator({ sampleRate: 48000, threshold: 'fixed' });
     if (!ok.ok) throw new Error('demod');
     expect(() => ok.value.setThresholdMode('adaptive')).not.toThrow();
-    // The documented no-op keeps 'fixed': a mark tone still decodes (adaptive would also, so this
-    // checks only that the call is accepted; the mode stays 'fixed' by construction until task 8).
+    expect(() => ok.value.setThresholdMode('bogus' as never)).not.toThrow();
   });
 
   it('D6: a carrier of amplitude A reads 20 log10(A) dBFS; A = 0.5 reads -6.02 dBFS (docs/math.md D6)', () => {
@@ -2682,5 +2745,199 @@ describe('v23-modem task 7: streaming demodulator', () => {
     expect(charsOf(first).map((c) => c.value)).toEqual([90]);
     r.value.reset();
     expect([...r.value.push(m.value), ...r.value.flush()]).toEqual(first);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 8: adaptive threshold. Offset signals are synthesised in closed form (fskOffset): the line
+// simulator (task 9) does not exist yet. Noise: gamma_3k = 20 dB (A7).
+
+const OFFSET_RUNS = isSlowTestsEnabled() ? 60 : 12;
+
+/** Events of a demodulator with the given options; chunked pushes, then flush. */
+function demodWith(x: Float32Array, fs: number, threshold: 'fixed' | 'adaptive' | undefined, chunkLens: readonly number[] = []): DemodEvent[] {
+  const r = createDemodulator({ sampleRate: fs, threshold });
+  if (!r.ok) throw new Error(JSON.stringify(r.error));
+  const out: DemodEvent[] = [];
+  let pos = 0;
+  for (const len of chunkLens) {
+    if (pos >= x.length) break;
+    const end = Math.min(x.length, pos + len);
+    out.push(...r.value.push(x.subarray(pos, end)));
+    pos = end;
+  }
+  out.push(...r.value.push(x.subarray(pos)));
+  out.push(...r.value.flush());
+  return out;
+}
+
+function noisyOffset(bytes: Uint8Array, fs: number, offsetHz: number, seed: number, idle = 0): Float32Array {
+  return awgn(fskOffset(bytes, fs, offsetHz, { idle }), { sampleRate: fs, snrDb: M8_SNR_3K_DB, bandwidthHz: 3000, signalAmplitude: 0.5, seed });
+}
+
+/** Estimated offset reported by the last diag: markHz - nominal mark. */
+function reportedOffset(events: readonly DemodEvent[]): number {
+  const diags = events.filter((e): e is Extract<DemodEvent, { type: 'diag' }> => e.type === 'diag');
+  return diags[diags.length - 1].markHz - FWD.markHz;
+}
+
+describe('v23-modem task 8: adaptive threshold', () => {
+  it('non-regression: the fixed-threshold output is identical to the task 7 code (golden digests)', () => {
+    // Digests produced by the task 7 code (commit 18a066b) with fixedGoldenDigests(), before any
+    // task 8 change: clean 48 kHz page, noisy 44.1 kHz page, connection + page at 16 kHz, and a
+    // +200 Hz offset page with noise at 22.05 kHz.
+    expect(fixedGoldenDigests()).toEqual([
+      '399d1a228b3e18e41e59fafe8f7d0279d4642f2b833a89314a80583fa4832a7f',
+      'f1b237aa2b9946ae7f0b79c473e7df98757ce863bff95c6ddb633d4edc15aeac',
+      '901c9e28d1a7aa2c406ea284138a82382d58c1667afc54e378243471525509a7',
+      'f5f84064866570dc49c731f4ae4077377cc5b3f7e13aa9f812f4a6ff0fea59d5',
+    ]);
+  });
+
+  it('M7 offset: in adaptive mode, for any offset in [-400, +400] Hz at 20 dB SNR, bytes are decoded without error and |offsetHz - true offset| <= 20', () => {
+    const failures: string[] = [];
+    let worstOffsetErr = 0;
+    const check = (fs: number, off: number, bytes: Uint8Array, seed: number, idle: number): void => {
+      const events = demodWith(noisyOffset(bytes, fs, off, seed, idle), fs, undefined);
+      const chars = charsOf(events);
+      const exact = chars.length === bytes.length && chars.every((c, j) => c.value === bytes[j] && c.parityOk && c.framingOk);
+      const err = Math.abs(reportedOffset(events) - off);
+      worstOffsetErr = Math.max(worstOffsetErr, err);
+      if (!exact || err > 20) failures.push(`fs=${fs} off=${off.toFixed(1)} idle=${idle} seed=${seed}: exact=${exact} offsetErr=${err.toFixed(2)}`);
+    };
+    const rng = createRng(88);
+    for (const fs of STANDARD_SAMPLE_RATES) {
+      const bytes = Uint8Array.from({ length: 40 }, () => Math.floor(rng.nextFloat() * 128));
+      for (const off of [-400, -300, -200, -100, 0, 100, 200, 300, 400]) check(fs, off, bytes, 500 + off + fs, 0);
+    }
+    fc.assert(
+      fc.property(
+        arbUartRate,
+        fc.double({ min: -400, max: 400, noNaN: true }),
+        arbBytes7(1, 40),
+        fc.integer({ min: 0, max: 2 }),
+        fc.integer({ min: 1, max: 0x7fffffff }),
+        (fs, off, bytes, idle, seed) => check(fs, off, bytes, seed, idle),
+      ),
+      { numRuns: OFFSET_RUNS },
+    );
+    console.log(`M7: ${failures.length} failing cases; worst |offset estimate - offset| ${worstOffsetErr.toFixed(2)} Hz`);
+    if (failures.length > 0) console.log(failures.slice(0, 20).join('\n'));
+    expect(failures).toEqual([]);
+  });
+
+  it('characterization: at +400 Hz the fixed threshold fails (mark sits on 1700 Hz), the adaptive one decodes', () => {
+    const fs = 48000;
+    const bytes = Uint8Array.from(ascii('3615 FANTOME'));
+    const x = noisyOffset(bytes, fs, 400, 4);
+    const fixedChars = charsOf(demodWith(x, fs, 'fixed'));
+    expect(charsAreExact(fixedChars as unknown as UartChar[], bytes)).toBe(false);
+    expect(charsOf(demodWith(x, fs, 'adaptive')).map((c) => c.value)).toEqual(Array.from(bytes));
+  });
+
+  it('diag: adaptive mode reports the threshold and tone estimates, fixed mode the nominal values', () => {
+    const fs = 22050;
+    const bytes = Uint8Array.from(ascii('ABCDEFGH'));
+    const x = noisyOffset(bytes, fs, -250, 9);
+    const adaptive = demodWith(x, fs, 'adaptive').filter((e): e is Extract<DemodEvent, { type: 'diag' }> => e.type === 'diag');
+    const last = adaptive[adaptive.length - 1];
+    expect(Math.abs(last.markHz - (FWD.markHz - 250))).toBeLessThanOrEqual(20);
+    expect(Math.abs(last.spaceHz - (FWD.spaceHz - 250))).toBeLessThanOrEqual(20);
+    expect(last.thresholdHz).toBeCloseTo((last.markHz + last.spaceHz) / 2, 9);
+    // Before the idle-carrier initialisation (carrier on + 20 ms), the nominal values are reported.
+    const silenceFirst = new Float32Array(Math.round(0.2 * fs) + x.length);
+    silenceFirst.set(x, Math.round(0.2 * fs));
+    const early = demodWith(silenceFirst, fs, 'adaptive').filter((e): e is Extract<DemodEvent, { type: 'diag' }> => e.type === 'diag');
+    expect(early[0]).toMatchObject({ thresholdHz: FWD.thresholdHz, markHz: FWD.markHz, spaceHz: FWD.spaceHz });
+    for (const g of demodWith(x, fs, 'fixed').filter((e): e is Extract<DemodEvent, { type: 'diag' }> => e.type === 'diag')) {
+      expect(g).toMatchObject({ thresholdHz: FWD.thresholdHz, markHz: FWD.markHz, spaceHz: FWD.spaceHz });
+    }
+  });
+
+  it('requirement 7.4: switching the mode while decoding keeps the position', () => {
+    const fs = 16000;
+    const rng = createRng(31);
+    const bytes = Uint8Array.from({ length: 60 }, () => Math.floor(rng.nextFloat() * 128));
+    const frameSamples = (FRAME.bitsPerFrame * fs) / FWD.baud;
+    const leadSamples = 0.1 * fs;
+    // Zero offset: both modes decode, so every byte must come out whatever the switches.
+    {
+      const x = noisyOffset(bytes, fs, 0, 21);
+      const r = createDemodulator({ sampleRate: fs, threshold: 'fixed' });
+      if (!r.ok) throw new Error('demod');
+      const events: DemodEvent[] = [];
+      const step = Math.round(frameSamples * 7.3);
+      let mode: 'fixed' | 'adaptive' = 'fixed';
+      for (let p = 0; p < x.length; p += step) {
+        events.push(...r.value.push(x.subarray(p, Math.min(x.length, p + step))));
+        mode = mode === 'fixed' ? 'adaptive' : 'fixed';
+        r.value.setThresholdMode(mode);
+      }
+      events.push(...r.value.flush());
+      expect(charsOf(events).map((c) => c.value)).toEqual(Array.from(bytes));
+    }
+    // +300 Hz: start in fixed mode, switch to adaptive in the middle. Every frame that starts after
+    // the switch is decoded, and no frame is duplicated or lost around it.
+    {
+      const x = noisyOffset(bytes, fs, 300, 22);
+      const r = createDemodulator({ sampleRate: fs, threshold: 'fixed' });
+      if (!r.ok) throw new Error('demod');
+      const switchAt = Math.round(leadSamples + 30.4 * frameSamples);
+      const events = [...r.value.push(x.subarray(0, switchAt))];
+      r.value.setThresholdMode('adaptive');
+      events.push(...r.value.push(x.subarray(switchAt)), ...r.value.flush());
+      const after = charsOf(events).filter((c) => c.atSample > switchAt + frameSamples);
+      const firstIndex = Math.round((after[0].atSample - leadSamples) / frameSamples);
+      expect(after.map((c) => c.value)).toEqual(Array.from(bytes.slice(firstIndex)));
+      expect(after.every((c) => c.parityOk && c.framingOk)).toBe(true);
+      expect(firstIndex).toBeLessThanOrEqual(33);
+    }
+  });
+
+  it('a connection sequence then an offset page: the estimates are re-initialised on the page carrier', () => {
+    const fs = 16000;
+    const seq = connectionSequence({ sampleRate: fs });
+    const bytes = Uint8Array.from(ascii('3615 SOMMAIRE'));
+    const page = noisyOffset(bytes, fs, 250, 5);
+    // 150 ms of silence after the sequence: the carrier drops (50 ms hold), the estimates are
+    // cleared, and the page carrier initialises them again. Without a drop, the estimates of the
+    // nominal connection carrier would be kept (design.md "Threshold", limits).
+    const gap = Math.round(0.15 * fs);
+    const x = new Float32Array(seq.length + gap + page.length);
+    x.set(seq, 0);
+    x.set(page, seq.length + gap);
+    const events = demodWith(x, fs, undefined);
+    expect(events.filter((e) => e.type === 'connect')).toHaveLength(1);
+    expect(charsOf(events).map((c) => c.value)).toEqual(Array.from(bytes));
+    expect(Math.abs(reportedOffset(events) - 250)).toBeLessThanOrEqual(20);
+  });
+
+  it('connect at every standard rate: the default connection sequence gives exactly one connect, at 500 ms (Goertzel fix)', () => {
+    for (const fs of STANDARD_SAMPLE_RATES) {
+      const connects = demodWith(connectionSequence({ sampleRate: fs }), fs, undefined).filter((e) => e.type === 'connect');
+      expect(connects, `fs=${fs}`).toHaveLength(1);
+      // 25 blocks of round(0.02 fs) samples.
+      expect(connects[0].atSample, `fs=${fs}`).toBe(25 * Math.round(0.02 * fs));
+    }
+    // A pure 2100 Hz tone fills its block: 2 |X|^2 / N^2 equals the mean square.
+    const fs = 16000;
+    const tone = demodWith(toneMs(fs, ANSWER_TONE_HZ, 600, 0.5), fs, undefined).filter((e) => e.type === 'connect');
+    expect(tone).toHaveLength(1);
+  });
+
+  it('M5 in adaptive mode: any partition gives the same events, with an offset and noise', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(16000, 48000),
+        arbBytes7(1, 15),
+        fc.double({ min: -400, max: 400, noNaN: true }),
+        fc.array(fc.integer({ min: 0, max: 5000 }), { maxLength: 25 }),
+        (fs, bytes, off, lens) => {
+          const x = noisyOffset(bytes, fs, off, 17);
+          expect(demodWith(x, fs, 'adaptive', [0, 1, ...lens])).toEqual(demodWith(x, fs, 'adaptive'));
+        },
+      ),
+      { numRuns: DEMOD_RUNS },
+    );
   });
 });
