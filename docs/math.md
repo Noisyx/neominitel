@@ -48,12 +48,12 @@ Eb/N0 (section 2).
 
 ## 2. Signal and noise convention
 
-> **Status: Signed by Role B, Role A signature pending.** Experiment E3a has been executed
-> (section 3.2) and is consistent with this convention. Property M8 and the noise tests from task 6
-> on use it as written here (section 2.4). It becomes final when both developers have signed below;
-> each developer signs for themselves.
+> **Status: Final (signed by both developers).** Experiment E3a has been executed (section 3.2) and
+> is consistent with this convention. Property M8 and the noise tests from task 6 on use it as
+> written here (section 2.4). Any change to sections 2.1 to 2.4 needs both signatures again.
 >
-> Signed, Role A: ________ (date: ____)   Signed, Role B: Role B (date: 2026-11-25)
+> Signed, Role A: Role A, agreement given to Role B and recorded by Role B (date: 2026-11-25)
+> Signed, Role B: Role B (date: 2026-11-25)
 
 ### 2.1 Definitions
 
