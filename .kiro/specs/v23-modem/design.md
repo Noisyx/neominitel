@@ -129,12 +129,29 @@ function berNoncoherentCorrelated(ebN0Db: number, rho: number): number;         
 ```
 Curve 3 is written by `scripts/montecarlo-ber.ts` to `public/data/ber-curve3.json` as `{ ebN0Db: number[]; ber: number[]; lo: number[]; hi: number[]; bitsPerPoint: number[]; seeds: number }`.
 
+### WAV API (`src/modem/wav.ts`)
+```ts
+interface WavAudio { samples: Float32Array; sampleRate: number }                 // mono
+const WAV_ERROR_REASONS: readonly ['too-short', 'not-riff', 'not-wave', 'missing-fmt', 'bad-fmt',
+  'unsupported-encoding', 'missing-data', 'data-truncated', 'too-large'];
+type WavErrorReason = (typeof WAV_ERROR_REASONS)[number];
+function writeWav(samples: Float32Array, sampleRate: number): Result<Uint8Array, ModemError>;
+function readWav(data: ArrayBuffer | Uint8Array): Result<WavAudio, ModemError>;
+```
+Added with task 4 (the first draft named only `writeWav` / `readWav` and the `wav` error); decisions W1 to W6.
+- **Writing.** Mono 16-bit PCM, a fixed 44-byte header (RIFF, `fmt ` of 16 bytes, `data`), no other chunk and no timestamp, so equal input gives equal bytes (needed by fantome H1). Sample x is stored as q(x) = clamp(round(x·32768), −32768, 32767), with `Math.round` (W1). `sampleRate` must be an integer in 8 000..96 000 Hz, else `bad-sample-rate` (W3). `bad-option` `samples` when a sample is NaN or infinite (its index is in the reason, W2), when the input is not a `Float32Array`, or when 36 + 2n overflows the uint32 RIFF size (n > 2 147 483 629).
+- **Reading.** 8-bit (unsigned), 16- and 24-bit PCM and 32-bit IEEE float, plain or in `WAVE_FORMAT_EXTENSIBLE` (sub-format GUID PCM or float, valid bits ≤ container bits). Integer codes are divided by 2^(bits−1) (8-bit: (u − 128)/128); float values are kept, NaN included. Several channels are averaged (arithmetic mean). Any header sample rate > 0 is returned; the demodulator checks the supported range (W3). Chunks other than `fmt ` and `data` are skipped with their odd-size pad byte; the RIFF size field is not trusted; the first `fmt ` and `data` are used. A chunk whose body runs past the end of the file ends the walk, except `data`, which is an error (W5).
+- **Errors.** `{ kind: 'wav', reason }` where `reason` is a `WavErrorReason`: a stable code the app translates (never renamed). `too-short` (< 12 bytes), `not-riff`, `not-wave`, `missing-fmt`, `bad-fmt` (chunk < 16 bytes, 0 channels, 0 Hz, `blockAlign` ≠ channels·bits/8, bad extensible fields), `unsupported-encoding` (other codecs, 32-bit integer PCM (W6), 64-bit float, RIFX, RF64), `missing-data`, `data-truncated` (data past the end of the file, or not a whole number of frames), `too-large` (the header and data chunk are valid, but the `Float32Array` of decoded samples cannot be allocated, for example a multi-gigabyte recording or a device low on memory; readWav returns this code instead of letting the `RangeError` escape; not covered by tests, since triggering it needs a file of several GB). `bad-option` `data` when the input is neither an `ArrayBuffer` nor a typed-array view. `readWav` never throws.
+- M9 holds exactly: `readWav(writeWav(x)).samples[i]` = q(x[i]) / 32768.
+
 ## Algorithms
 
 ### Modulator
 - The bit timeline is computed in real time: bit k (counting idle lead as bits of mark) covers [t₀ + k/baud, t₀ + (k+1)/baud). Sample n gets the frequency of the bit that contains n / fs. This makes the length exact and stops rounding from accumulating.
-- Phase accumulator in double precision: φ += 2π·f/fs, sample = A·w(n)·sin φ, where w is the raised-cosine ramp at carrier start and end. The effective ramp length is min(`rampMs`, `leadIdleMs`) at the start and min(`rampMs`, `tailIdleMs`) at the end, so a ramp never overlaps a frame.
-- `bitErrors` inverts chosen line bits after framing. It exists only for property tests (parity and framing errors) and is never set by the app.
+- Phase in closed form, in double precision: c(t) = markHz·t + (spaceHz − markHz)·S(t) cycles, where S(t) is the time spent at space before t (integer count of past space bits divided by baud, plus the elapsed part of the current bit when it is a space). Sample = A·w(n)·sin(2π·frac(c(n/fs))), where w is the raised-cosine ramp at carrier start and end. c(t) is continuous, so the phase is exactly continuous at every bit boundary and no rounding accumulates.
+  - Deviation from the first draft, recorded per AGENTS.md rule 7: the draft used an accumulator φ += 2π·f/fs with the frequency of the bit containing n/fs. That accumulator misplaces every bit boundary that falls between two samples by up to (spaceHz − markHz)/fs cycle; the closed form removes this error. Signatures and properties are unchanged.
+- Ramp: R samples, w(n) = ½·(1 − cos(π·n/R)) for n < R and 1 from n = R; the ramp-down is symmetric and ends on the last sample (w = 0). The effective ramp length is min(`rampMs`, `leadIdleMs`) at the start and min(`rampMs`, `tailIdleMs`) at the end, also clamped to the number of idle samples, so a ramp never touches a frame sample. A zero idle or a zero `rampMs` means no ramp on that side. A ramp shorter than R_min = ⌈fs / (2√2·f_max)⌉ samples (f_max = max(markHz, spaceHz)) is also omitted: below that length the raised cosine itself breaks M3, while R ≥ R_min keeps |x[n+1] − x[n]| ≤ A·2π·f_max/fs (derivation in `modulator.ts`). R_min is at most 0.88 ms at every supported rate, so idles of 1 ms or more always keep their ramp; shorter idles are still accepted.
+- `bitErrors` inverts chosen line bits after framing. It exists only for property tests (parity and framing errors) and is never set by the app. Indices count line bits from the first start bit (index 0), inter-frame idle bits included; the leading and trailing idle are not indexed. A non-integer or out-of-range index returns `bad-option`; a repeated index inverts its bit once.
 
 ### Discriminator
 1. Complex mix: z[n] = x[n]·e^(−j2π·mixHz·n/fs).

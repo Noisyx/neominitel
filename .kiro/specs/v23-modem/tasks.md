@@ -8,22 +8,22 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - Helpers: seeded RNG, `awgn` (Eb/N0 convention of `docs/math.md`), windowed-sinc `resample`, random 7-bit byte arbitrary.
   - _Requirements: 13_
 
-- [ ] 2. Constants and framing `[MVP]`
-  - [ ] 2.1 `v23.ts` with `CHANNELS` and `FRAME` from the design table.
-  - [ ] 2.2 `frame.ts`: byte → 10 line bits, line bits → byte + parity/framing status.
-  - [ ] 2.3 Unit tests for parity of 0x00, 0x7F, 'A'.
+- [x] 2. Constants and framing `[MVP]`
+  - [x] 2.1 `v23.ts` with `CHANNELS` and `FRAME` from the design table.
+  - [x] 2.2 `frame.ts`: byte → 10 line bits, line bits → byte + parity/framing status.
+  - [x] 2.3 Unit tests for parity of 0x00, 0x7F, 'A'.
   - _Requirements: 1.1-1.4_
 
-- [ ] 3. Modulator `[MVP]`
-  - [ ] 3.1 Phase-continuous oscillator driven by an exact bit timeline.
-  - [ ] 3.2 `modulate()` with idle lead/tail, inter-frame idle, raised-cosine ramps limited to the available idle duration, typed errors, `bitErrors` test option.
-  - [ ] 3.3 `connectionSequence()`. Default durations are provisional until task 12.
-  - [ ] 3.4 Property tests M2, M3, M4 (parity half).
+- [x] 3. Modulator `[MVP]`
+  - [x] 3.1 Phase-continuous oscillator driven by an exact bit timeline.
+  - [x] 3.2 `modulate()` with idle lead/tail, inter-frame idle, raised-cosine ramps limited to the available idle duration, typed errors, `bitErrors` test option.
+  - [x] 3.3 `connectionSequence()`. Default durations are provisional until task 12.
+  - [x] 3.4 Property tests M2, M3, M4 (parity half).
   - _Requirements: 2.1-2.7, 3.1-3.2_
 
-- [ ] 4. WAV input/output `[MVP]`
-  - [ ] 4.1 `writeWav` / `readWav` with typed errors.
-  - [ ] 4.2 Property test M9 and malformed-header unit tests.
+- [x] 4. WAV input/output `[MVP]`
+  - [x] 4.1 `writeWav` / `readWav` with typed errors.
+  - [x] 4.2 Property test M9 and malformed-header unit tests.
   - _Requirements: 4.1-4.3_
 
 - [ ] 5. Discriminator `[MVP]`
