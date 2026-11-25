@@ -21,9 +21,9 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - [x] 3.4 Property tests M2, M3, M4 (parity half).
   - _Requirements: 2.1-2.7, 3.1-3.2_
 
-- [ ] 4. WAV input/output `[MVP]`
-  - [ ] 4.1 `writeWav` / `readWav` with typed errors.
-  - [ ] 4.2 Property test M9 and malformed-header unit tests.
+- [x] 4. WAV input/output `[MVP]`
+  - [x] 4.1 `writeWav` / `readWav` with typed errors.
+  - [x] 4.2 Property test M9 and malformed-header unit tests.
   - _Requirements: 4.1-4.3_
 
 - [ ] 5. Discriminator `[MVP]`

@@ -29,7 +29,15 @@ import {
   minRampSamples,
   modulate,
 } from '../../src/modem/modulator';
-import type { ModulateOptions } from '../../src/modem';
+import {
+  WAV_ERROR_REASONS,
+  WAV_HEADER_BYTES,
+  WAV_MAX_SAMPLES,
+  readWav,
+  writeWav,
+  type WavErrorReason,
+} from '../../src/modem/wav';
+import { readWav as readWavPublic, writeWav as writeWavPublic, type ModulateOptions } from '../../src/modem';
 import { STANDARD_SAMPLE_RATES, arbStandardSampleRate, isSlowTestsEnabled } from '../helpers';
 
 const NUM_RUNS = isSlowTestsEnabled() ? 2000 : 200;
@@ -932,3 +940,398 @@ describe('v23-modem task 3.3: connection sequence', () => {
 });
 
 type ConnectionSequenceOptionsLike = Parameters<typeof connectionSequence>[0];
+
+// ---------------------------------------------------------------------------------------------
+// Task 4: WAV input/output. Test files are built byte by byte below, independently of writeWav.
+
+const GUID_TAIL = [0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71];
+
+function le16(v: number): number[] {
+  return [v & 0xff, (v >>> 8) & 0xff];
+}
+function le32(v: number): number[] {
+  return [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
+}
+function ascii(s: string): number[] {
+  return Array.from(s, (c) => c.charCodeAt(0));
+}
+function concatBytes(parts: ArrayLike<number>[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.length;
+  }
+  return out;
+}
+/** One RIFF chunk; the pad byte after an odd body is added unless `pad` is false. */
+function chunk(id: string, body: ArrayLike<number>, o: { size?: number; pad?: boolean } = {}): Uint8Array {
+  const pad = (o.pad ?? true) && body.length % 2 === 1 ? [0] : [];
+  return concatBytes([ascii(id), le32(o.size ?? body.length), body, pad]);
+}
+function riffFile(chunks: Uint8Array[], o: { riffId?: string; form?: string } = {}): Uint8Array {
+  const body = concatBytes(chunks);
+  return concatBytes([ascii(o.riffId ?? 'RIFF'), le32(4 + body.length), ascii(o.form ?? 'WAVE'), body]);
+}
+function fmtBody(tag: number, channels: number, rate: number, bits: number, blockAlign = (channels * bits) / 8): number[] {
+  return [...le16(tag), ...le16(channels), ...le32(rate), ...le32(rate * blockAlign), ...le16(blockAlign), ...le16(bits)];
+}
+function extFmtBody(
+  subTag: number,
+  channels: number,
+  rate: number,
+  bits: number,
+  o: { validBits?: number; cbSize?: number; guidTail?: number[] } = {},
+): number[] {
+  return [
+    ...fmtBody(0xfffe, channels, rate, bits),
+    ...le16(o.cbSize ?? 22),
+    ...le16(o.validBits ?? bits),
+    ...le32(0),
+    ...le16(subTag),
+    ...(o.guidTail ?? GUID_TAIL),
+  ];
+}
+function wavOf(fmt: number[], data: ArrayLike<number>): Uint8Array {
+  return riffFile([chunk('fmt ', fmt), chunk('data', data)]);
+}
+type SampleFormat = 'pcm8' | 'pcm16' | 'pcm24' | 'float32';
+const FORMAT_BITS: Record<SampleFormat, number> = { pcm8: 8, pcm16: 16, pcm24: 24, float32: 32 };
+/** Encodes interleaved values: signed integer codes for PCM, float32 values for 'float32'. */
+function encodeSamples(format: SampleFormat, values: number[]): Uint8Array {
+  const bytes = FORMAT_BITS[format] / 8;
+  const out = new Uint8Array(values.length * bytes);
+  const view = new DataView(out.buffer);
+  values.forEach((v, i) => {
+    const p = i * bytes;
+    if (format === 'pcm8') view.setUint8(p, v + 128);
+    else if (format === 'pcm16') view.setInt16(p, v, true);
+    else if (format === 'pcm24') {
+      view.setUint8(p, v & 0xff);
+      view.setUint8(p + 1, (v >> 8) & 0xff);
+      view.setUint8(p + 2, (v >> 16) & 0xff);
+    } else view.setFloat32(p, v, true);
+  });
+  return out;
+}
+function fmtFor(format: SampleFormat, channels: number, rate: number): number[] {
+  return fmtBody(format === 'float32' ? 3 : 1, channels, rate, FORMAT_BITS[format]);
+}
+/** Value read back from one encoded sample (the reference scaling of requirement 4.2). */
+function nominalValue(format: SampleFormat, v: number): number {
+  if (format === 'float32') return Math.fround(v);
+  return v / 2 ** (FORMAT_BITS[format] - 1);
+}
+function wavErr(reason: WavErrorReason) {
+  return { ok: false, error: { kind: 'wav', reason } };
+}
+/** clamp(round(x * 32768), -32768, 32767) / 32768, with -0 normalised to 0. */
+function quantized16(x: number): number {
+  return (Math.min(32767, Math.max(-32768, Math.round(x * 32768))) + 0) / 32768;
+}
+function expectSamples(r: ReturnType<typeof readWav>, expected: number[], sampleRate?: number): void {
+  expect(r.ok).toBe(true);
+  if (!r.ok) return;
+  expect(r.value.samples).toBeInstanceOf(Float32Array);
+  expect(Array.from(r.value.samples)).toEqual(expected.map((v) => Math.fround(v)));
+  if (sampleRate !== undefined) expect(r.value.sampleRate).toBe(sampleRate);
+}
+
+describe('v23-modem task 4.1: writeWav', () => {
+  it('writes the deterministic 44-byte RIFF header and clamped 16-bit codes (requirement 4.1)', () => {
+    const r = writeWav(new Float32Array([0, 0.5, -1, 1]), 48000);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(WAV_HEADER_BYTES).toBe(44);
+    // Golden bytes, written out by hand from the RIFF/WAVE layout.
+    expect(Array.from(r.value)).toEqual([
+      ...ascii('RIFF'), 0x2c, 0, 0, 0, ...ascii('WAVE'),
+      ...ascii('fmt '), 16, 0, 0, 0, 1, 0, 1, 0, 0x80, 0xbb, 0, 0, 0x00, 0x77, 0x01, 0, 2, 0, 16, 0,
+      ...ascii('data'), 8, 0, 0, 0,
+      0x00, 0x00, 0x00, 0x40, 0x00, 0x80, 0xff, 0x7f,
+    ]);
+    const again = writeWav(new Float32Array([0, 0.5, -1, 1]), 48000);
+    expect(again).toEqual(r);
+  });
+
+  it('an empty signal gives a valid 44-byte file that reads back empty', () => {
+    const r = writeWav(new Float32Array(0), 8000);
+    expect(r.ok && r.value.length).toBe(44);
+    if (!r.ok) return;
+    expectSamples(readWav(r.value), [], 8000);
+  });
+
+  it('rejects a sample rate that is not an integer in 8 000..96 000 Hz', () => {
+    for (const fs of [7999, 96001, 44100.5, 0, -48000, Number.NaN, Infinity]) {
+      expect(writeWav(new Float32Array(4), fs)).toEqual({
+        ok: false,
+        error: { kind: 'bad-sample-rate', sampleRate: fs },
+      });
+    }
+    for (const fs of [8000, 11025, 22050, 44100, 48000, 96000]) expect(writeWav(new Float32Array(4), fs).ok).toBe(true);
+  });
+
+  it('rejects non-finite samples with their index (decision W2), and non-Float32Array input', () => {
+    for (const bad of [Number.NaN, Infinity, -Infinity]) {
+      const x = new Float32Array([0, 0.1, bad, 0]);
+      const r = writeWav(x, 48000);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.error).toMatchObject({ kind: 'bad-option', option: 'samples' });
+      expect(r.error.kind === 'bad-option' && r.error.reason).toContain('index 2');
+    }
+    for (const notF32 of [[0, 1], new Float64Array(2), new Int16Array(2), null, undefined]) {
+      expect(writeWav(notF32 as never, 48000)).toMatchObject({ ok: false, error: { kind: 'bad-option', option: 'samples' } });
+    }
+  });
+
+  it('detects RIFF size overflow: WAV_MAX_SAMPLES is the largest count whose sizes fit in uint32', () => {
+    expect(WAV_MAX_SAMPLES).toBe(2147483629);
+    expect(36 + 2 * WAV_MAX_SAMPLES).toBeLessThanOrEqual(0xffffffff);
+    expect(36 + 2 * (WAV_MAX_SAMPLES + 1)).toBeGreaterThan(0xffffffff);
+    // A Float32Array whose length reports one sample too many (no 8 GB allocation needed).
+    const huge = Object.defineProperty(new Float32Array(0), 'length', { value: WAV_MAX_SAMPLES + 1 });
+    const r = writeWav(huge, 48000);
+    expect(r).toMatchObject({ ok: false, error: { kind: 'bad-option', option: 'samples' } });
+    expect(!r.ok && r.error.kind === 'bad-option' && r.error.reason).toContain('RIFF');
+  });
+});
+
+describe('v23-modem task 4.2: WAV properties and readWav', () => {
+  it('M9 WAV: readWav(writeWav(x)) equals x quantized to 16 bits', () => {
+    const arbSample = fc.oneof(
+      fc.float({ min: -1.5, max: 1.5, noNaN: true }),
+      fc.float({ noNaN: true, noDefaultInfinity: true }),
+      fc.constantFrom(0, -0, 1, -1, 0.5 / 32768, -0.5 / 32768, 1.5 / 32768, 32767.5 / 32768, -32768.5 / 32768),
+    );
+    fc.assert(
+      fc.property(fc.array(arbSample, { maxLength: 300 }), fc.integer({ min: 8000, max: 96000 }), (values, fs) => {
+        const x = Float32Array.from(values);
+        const w = writeWav(x, fs);
+        expect(w.ok).toBe(true);
+        if (!w.ok) return;
+        expect(w.value.length).toBe(44 + 2 * x.length);
+        const r = readWav(w.value);
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        expect(r.value.sampleRate).toBe(fs);
+        expect(Array.from(r.value.samples)).toEqual(Array.from(x, quantized16));
+      }),
+      { numRuns: NUM_RUNS },
+    );
+  });
+
+  it('decodes 8/16/24-bit PCM and 32-bit float exactly, multi-channel averaged (requirement 4.2)', () => {
+    const arbCase = fc
+      .record({
+        format: fc.constantFrom<SampleFormat>('pcm8', 'pcm16', 'pcm24', 'float32'),
+        channels: fc.integer({ min: 1, max: 8 }),
+        frames: fc.integer({ min: 0, max: 40 }),
+        rate: fc.oneof(fc.integer({ min: 1, max: 0x7fffffff }), fc.constantFrom(1, 8000, 192000, 0xffffffff)),
+      })
+      .chain((c) => {
+        const bits = FORMAT_BITS[c.format];
+        const v =
+          c.format === 'float32'
+            ? fc.float({ noNaN: true, noDefaultInfinity: true, min: -4, max: 4 })
+            : fc.integer({ min: -(2 ** (bits - 1)), max: 2 ** (bits - 1) - 1 });
+        return fc.record({ c: fc.constant(c), values: fc.array(v, { minLength: c.channels * c.frames, maxLength: c.channels * c.frames }) });
+      });
+    fc.assert(
+      fc.property(arbCase, ({ c, values }) => {
+        const r = readWav(wavOf(fmtFor(c.format, c.channels, c.rate), encodeSamples(c.format, values)));
+        const expected: number[] = [];
+        for (let f = 0; f < c.frames; f++) {
+          let sum = 0;
+          for (let ch = 0; ch < c.channels; ch++) sum += nominalValue(c.format, values[f * c.channels + ch]);
+          expected.push(sum / c.channels);
+        }
+        expectSamples(r, expected, c.rate);
+      }),
+      { numRuns: NUM_RUNS },
+    );
+  });
+
+  it('known values: 8-bit unsigned, 24-bit sign extension, stereo mean, float NaN preserved', () => {
+    expectSamples(readWav(wavOf(fmtBody(1, 1, 8000, 8), [0, 128, 255, 64])), [-1, 0, 127 / 128, -0.5], 8000);
+    expectSamples(
+      readWav(wavOf(fmtBody(1, 1, 44100, 24), encodeSamples('pcm24', [0x7fffff, -0x800000, 1, -1]))),
+      [0x7fffff / 8388608, -1, 1 / 8388608, -1 / 8388608],
+    );
+    expectSamples(readWav(wavOf(fmtBody(1, 2, 48000, 16), encodeSamples('pcm16', [16384, -16384, 32767, 32767]))), [0, 32767 / 32768]);
+    const f = readWav(wavOf(fmtBody(3, 1, 48000, 32), encodeSamples('float32', [0.25, Number.NaN, 2, -3])));
+    expect(f.ok).toBe(true);
+    if (!f.ok) return;
+    expect(f.value.samples[0]).toBe(0.25);
+    expect(Number.isNaN(f.value.samples[1])).toBe(true);
+    expect(Array.from(f.value.samples.subarray(2))).toEqual([2, -3]);
+    const st = readWav(wavOf(fmtBody(3, 2, 48000, 32), encodeSamples('float32', [0.25, 0.75, Number.NaN, 1])));
+    expect(st.ok && st.value.samples[0]).toBe(0.5);
+    expect(st.ok && Number.isNaN(st.value.samples[1])).toBe(true);
+  });
+
+  it('WAVE_FORMAT_EXTENSIBLE with PCM or float sub-format; other sub-formats are refused', () => {
+    expectSamples(
+      readWav(wavOf(extFmtBody(1, 2, 48000, 24, { validBits: 20 }), encodeSamples('pcm24', [0x100000, 0x300000]))),
+      [0x200000 / 8388608],
+      48000,
+    );
+    expectSamples(readWav(wavOf(extFmtBody(3, 1, 22050, 32), encodeSamples('float32', [0.125]))), [0.125], 22050);
+    expectSamples(readWav(wavOf(extFmtBody(1, 1, 8000, 16, { validBits: 0 }), encodeSamples('pcm16', [-32768]))), [-1]);
+    const otherGuid = [...GUID_TAIL];
+    otherGuid[13] ^= 1;
+    expect(readWav(wavOf(extFmtBody(1, 1, 8000, 16, { guidTail: otherGuid }), [0, 0]))).toEqual(wavErr('unsupported-encoding'));
+    expect(readWav(wavOf(extFmtBody(1, 1, 8000, 32), [0, 0, 0, 0]))).toEqual(wavErr('unsupported-encoding'));
+    expect(readWav(wavOf(extFmtBody(2, 1, 8000, 16), [0, 0]))).toEqual(wavErr('unsupported-encoding'));
+    expect(readWav(wavOf(extFmtBody(1, 1, 8000, 16, { cbSize: 21 }), [0, 0]))).toEqual(wavErr('bad-fmt'));
+    expect(readWav(wavOf(extFmtBody(1, 1, 8000, 16, { validBits: 17 }), [0, 0]))).toEqual(wavErr('bad-fmt'));
+    expect(readWav(wavOf(extFmtBody(1, 1, 8000, 16).slice(0, 38), [0, 0]))).toEqual(wavErr('bad-fmt'));
+  });
+
+  it('skips unknown chunks with odd padding, accepts fmt after data, ignores the RIFF size and trailing junk', () => {
+    const data = encodeSamples('pcm16', [100, -200, 300]);
+    const expected = [100 / 32768, -200 / 32768, 300 / 32768];
+    const fmt = fmtBody(1, 1, 16000, 16);
+    const file = riffFile([chunk('LIST', [1, 2, 3]), chunk('fmt ', fmt), chunk('fact', [9]), chunk('data', data), chunk('id3 ', [7, 7, 7, 7, 7])]);
+    expectSamples(readWav(file), expected, 16000);
+    expectSamples(readWav(riffFile([chunk('data', data), chunk('JUNK', [0]), chunk('fmt ', fmt)])), expected);
+    const wrongRiffSize = file.slice();
+    wrongRiffSize.set(le32(0), 4);
+    expectSamples(readWav(wrongRiffSize), expected);
+    // A trailing chunk that runs past the end, and fewer than 8 trailing bytes, are ignored.
+    expectSamples(readWav(concatBytes([wavOf(fmt, data), chunk('JUNK', [1, 2], { size: 1000 })])), expected);
+    expectSamples(readWav(concatBytes([wavOf(fmt, data), [1, 2, 3]])), expected);
+    // Odd-size 8-bit data at the very end of the file, without its pad byte.
+    const odd = riffFile([chunk('fmt ', fmtBody(1, 1, 8000, 8)), chunk('data', [128, 0, 255], { pad: false })]);
+    expectSamples(readWav(odd), [0, -1, 127 / 128]);
+    // The first fmt and data chunks are used.
+    const twice = riffFile([
+      chunk('fmt ', fmt),
+      chunk('data', data),
+      chunk('fmt ', fmtBody(1, 2, 8000, 16)),
+      chunk('data', [1, 2]),
+    ]);
+    expectSamples(readWav(twice), expected, 16000);
+  });
+
+  it('accepts ArrayBuffer, Uint8Array views with an offset and Node Buffers', () => {
+    const file = wavOf(fmtBody(1, 1, 8000, 16), encodeSamples('pcm16', [1234]));
+    const expected = [1234 / 32768];
+    const ab = new ArrayBuffer(file.length);
+    new Uint8Array(ab).set(file);
+    expectSamples(readWav(ab), expected);
+    const big = new Uint8Array(file.length + 7);
+    big.set(file, 3);
+    expectSamples(readWav(big.subarray(3, 3 + file.length)), expected);
+    expectSamples(readWav(Buffer.from(file)), expected);
+  });
+
+  it('typed errors name the problem (requirement 4.3)', () => {
+    const fmt16 = fmtBody(1, 1, 8000, 16);
+    const valid = wavOf(fmt16, [0, 0]);
+    const cases: [Uint8Array, WavErrorReason][] = [
+      [new Uint8Array(0), 'too-short'],
+      [valid.slice(0, 11), 'too-short'],
+      [riffFile([chunk('fmt ', fmt16), chunk('data', [0, 0])], { riffId: 'JUNK' }), 'not-riff'],
+      [riffFile([chunk('fmt ', fmt16), chunk('data', [0, 0])], { riffId: 'RIFX' }), 'unsupported-encoding'],
+      [riffFile([chunk('fmt ', fmt16), chunk('data', [0, 0])], { riffId: 'RF64' }), 'unsupported-encoding'],
+      [riffFile([chunk('fmt ', fmt16), chunk('data', [0, 0])], { form: 'AVI ' }), 'not-wave'],
+      [riffFile([]), 'missing-fmt'],
+      [riffFile([chunk('data', [0, 0])]), 'missing-fmt'],
+      [riffFile([chunk('fmt ', fmt16, { size: 100 })]), 'missing-fmt'],
+      [riffFile([chunk('fmt ', fmt16)]), 'missing-data'],
+      [riffFile([chunk('fmt ', fmt16), chunk('LIST', [1, 2])]), 'missing-data'],
+      [wavOf(fmt16.slice(0, 14), [0, 0]), 'bad-fmt'],
+      [wavOf(fmtBody(1, 0, 8000, 16, 2), [0, 0]), 'bad-fmt'],
+      [wavOf(fmtBody(1, 1, 0, 16), [0, 0]), 'bad-fmt'],
+      [wavOf(fmtBody(1, 2, 8000, 16, 2), [0, 0]), 'bad-fmt'],
+      [wavOf(fmtBody(1, 1, 8000, 16, 3), [0, 0, 0]), 'bad-fmt'],
+      [wavOf(fmtBody(1, 1, 8000, 32), [0, 0, 0, 0]), 'unsupported-encoding'], // decision W6
+      [wavOf(fmtBody(1, 1, 8000, 12, 2), [0, 0]), 'unsupported-encoding'],
+      [wavOf(fmtBody(2, 1, 8000, 4, 1), [0]), 'unsupported-encoding'], // MS ADPCM
+      [wavOf(fmtBody(6, 1, 8000, 8), [0]), 'unsupported-encoding'], // A-law
+      [wavOf(fmtBody(7, 1, 8000, 8), [0]), 'unsupported-encoding'], // mu-law
+      [wavOf(fmtBody(3, 1, 8000, 64), new Array(8).fill(0)), 'unsupported-encoding'],
+      [wavOf(fmtBody(3, 1, 8000, 16), [0, 0]), 'unsupported-encoding'],
+      [riffFile([chunk('fmt ', fmt16), chunk('data', [0, 0], { size: 4 })]), 'data-truncated'],
+      [riffFile([chunk('fmt ', fmt16), chunk('data', [0, 0], { size: 0xffffffff })]), 'data-truncated'],
+      [riffFile([chunk('fmt ', fmt16), chunk('data', [0, 0, 0])]), 'data-truncated'],
+      [riffFile([chunk('fmt ', fmtBody(1, 2, 8000, 24)), chunk('data', new Array(9).fill(0))]), 'data-truncated'],
+    ];
+    const seen = new Set<string>();
+    for (const [file, reason] of cases) {
+      expect(readWav(file), reason).toEqual(wavErr(reason));
+      seen.add(reason);
+    }
+    // Every stable code is exercised here except 'too-large' (needs a multi-GB file).
+    expect(WAV_ERROR_REASONS).toEqual([
+      'too-short', 'not-riff', 'not-wave', 'missing-fmt', 'bad-fmt',
+      'unsupported-encoding', 'missing-data', 'data-truncated', 'too-large',
+    ]);
+    expect([...seen].sort()).toEqual(WAV_ERROR_REASONS.filter((r) => r !== 'too-large').sort());
+    for (const notBytes of [null, undefined, 'RIFF', 42, [82, 73, 70, 70], {}]) {
+      expect(readWav(notBytes as never)).toMatchObject({ ok: false, error: { kind: 'bad-option', option: 'data' } });
+    }
+  });
+
+  it('robustness: arbitrary, truncated or corrupted bytes never throw and give a typed result', () => {
+    const reasons: readonly string[] = WAV_ERROR_REASONS;
+    const check = (bytes: Uint8Array): ReturnType<typeof readWav> => {
+      let r: ReturnType<typeof readWav> | undefined;
+      expect(() => {
+        r = readWav(bytes);
+      }).not.toThrow();
+      if (r === undefined) throw new Error('unreachable');
+      if (r.ok) expect(r.value.samples).toBeInstanceOf(Float32Array);
+      else expect(r.error.kind === 'wav' && reasons.includes(r.error.reason)).toBe(true);
+      return r;
+    };
+    const header = riffFile([]);
+    fc.assert(
+      fc.property(fc.uint8Array({ maxLength: 200 }), fc.boolean(), (tail, withHeader) => {
+        check(withHeader ? concatBytes([header, tail]) : tail);
+      }),
+      { numRuns: NUM_RUNS },
+    );
+    // Every truncation of a valid file with an extra chunk: only the full file decodes.
+    const full = riffFile([
+      chunk('fmt ', fmtBody(1, 2, 8000, 16)),
+      chunk('LIST', [1, 2, 3]),
+      chunk('data', encodeSamples('pcm16', [1, 2, 3, 4, 5, 6])),
+    ]);
+    for (let n = 0; n <= full.length; n++) {
+      const r = check(full.subarray(0, n));
+      expect(r.ok, `length ${n}`).toBe(n === full.length);
+      // Once the data chunk header (last 20 bytes: 8 header + 12 body) is complete, the body is short.
+      if (n >= full.length - 12 && n < full.length) expect(r).toEqual(wavErr('data-truncated'));
+    }
+    // Random byte overwrites of a valid extensible file.
+    const ext = wavOf(extFmtBody(3, 2, 48000, 32), encodeSamples('float32', [0.1, 0.2, 0.3, 0.4]));
+    fc.assert(
+      fc.property(fc.array(fc.tuple(fc.nat(ext.length - 1), fc.integer({ min: 0, max: 255 })), { maxLength: 8 }), (edits) => {
+        const b = ext.slice();
+        for (const [i, v] of edits) b[i] = v;
+        check(b);
+      }),
+      { numRuns: NUM_RUNS },
+    );
+  });
+
+  it('round trip through the public barrel: modulate -> writeWav -> readWav', () => {
+    const bytes = Uint8Array.from(ascii('3615'));
+    const m = modulate(bytes, { sampleRate: 44100 });
+    expect(m.ok).toBe(true);
+    if (!m.ok) return;
+    const w = writeWavPublic(m.value, 44100);
+    expect(w.ok).toBe(true);
+    if (!w.ok) return;
+    const r = readWavPublic(w.value);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.sampleRate).toBe(44100);
+    expect(r.value.samples.length).toBe(m.value.length);
+    let maxErr = 0;
+    for (let i = 0; i < m.value.length; i++) maxErr = Math.max(maxErr, Math.abs(r.value.samples[i] - m.value[i]));
+    expect(maxErr).toBeLessThanOrEqual(0.5 / 32768);
+  });
+});
