@@ -23,3 +23,4 @@ export {
   type NoiseParams,
 } from './channel';
 export { pn9Frames, BerCounter, wilsonInterval, wilson95, type BerSnapshot } from './prbs';
+export { FORWARD_RHO, berOrthogonalNoncoherent, berNoncoherentCorrelated } from './theory';

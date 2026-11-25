@@ -53,6 +53,9 @@ import {
   wilsonInterval,
 } from '../../src/modem';
 import { m2m4, snrReport } from '../../src/modem/quality';
+import { FORWARD_RHO, berNoncoherentCorrelated, berOrthogonalNoncoherent } from '../../src/modem';
+import { marcumQ1 } from '../../src/modem/theory';
+import { chainBer, framesForBits } from '../helpers/modem-ber';
 import { CARRIER, DISCRIMINATOR } from '../../src/modem/v23';
 import {
   ComplexDecimatingFir,
@@ -3581,21 +3584,23 @@ describe('v23-modem task 10: quality events', () => {
   });
 });
 
+/**
+ * Eb/N0 of property M6, calibrated (docs/calibration.md "M6"): the first value of a 0.5 dB grid at
+ * which seeds 1..40 pass at 8, 16 and 48 kHz in both threshold modes. The design target was 12 dB.
+ */
+const M6_EBN0_DB = 16.5;
+
 describe('v23-modem task 10: BER under noise (slow mode)', () => {
   // design.md "Testing": the Monte Carlo property M6 runs in slow mode only.
-  it.runIf(isSlowTestsEnabled())('M6 noise: at Eb/N0 >= 12 dB (target, to calibrate), BER on 20 000 PN9 bits is <= 1e-3 for 20 seeds', () => {
+  it.runIf(isSlowTestsEnabled())(`M6 noise: at Eb/N0 >= ${M6_EBN0_DB} dB (calibrated), BER on 20 000 PN9 bits is <= 1e-3 for 20 seeds`, () => {
     const fs = 16000;
-    const ebN0Db = 12;
-    // 3 200 frames (22 400 bits): lost frames are not compared, so at least 20 000 bits remain.
-    const x = mustModulate(pn9Frames(3200), { sampleRate: fs });
+    const ebN0Db = M6_EBN0_DB;
     const bers: string[] = [];
     let failing = 0;
     const results: { seed: number; bits: number; ber: number }[] = [];
     for (let seed = 1; seed <= 20; seed++) {
-      const y = mustApply(x, { sampleRate: fs, seed, noise: { kind: 'ebN0', db: ebN0Db } });
-      const counter = new BerCounter();
-      for (const c of charsOf(demodWith(y, fs, undefined))) counter.pushFrame(c.value, c.framingOk);
-      const s = counter.snapshot();
+      // framesForBits: lost frames are not compared, so at least 20 000 bits remain.
+      const s = chainBer({ sampleRate: fs, ebN0Db, seed, frames: framesForBits(20000) });
       results.push({ seed, bits: s.bits, ber: s.ber });
       bers.push(s.ber.toExponential(2));
       if (s.ber > 1e-3 || s.bits < 20000) failing++;
@@ -3604,6 +3609,147 @@ describe('v23-modem task 10: BER under noise (slow mode)', () => {
     for (const r of results) {
       expect(r.ber, `seed ${r.seed}`).toBeLessThanOrEqual(1e-3);
       expect(r.bits, `seed ${r.seed}`).toBeGreaterThanOrEqual(20000);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 11: theory curves (requirement 10.4, design.md "Theory API", docs/math.md section 6)
+
+describe('v23-modem task 11: theory curves', () => {
+  it('M12 theory: curve 1 and curve 2 are decreasing in Eb/N0; curve 2 equals curve 1 when rho = 0 (numerical check <= 1e-6)', () => {
+    let prev1 = Infinity;
+    let prev2 = Infinity;
+    let worstRho0 = 0;
+    for (let db = -10; db <= 30.0001; db += 0.05) {
+      const c1 = berOrthogonalNoncoherent(db);
+      const c2 = berNoncoherentCorrelated(db, FORWARD_RHO);
+      expect(Number.isFinite(c1) && Number.isFinite(c2), `finite at ${db}`).toBe(true);
+      expect(c1, `curve 1 at ${db}`).toBeLessThan(prev1);
+      expect(c2, `curve 2 at ${db}`).toBeLessThan(prev2);
+      expect(c2).toBeGreaterThan(c1); // correlation costs Eb/N0
+      prev1 = c1;
+      prev2 = c2;
+      worstRho0 = Math.max(worstRho0, Math.abs(berNoncoherentCorrelated(db, 0) - c1));
+    }
+    expect(worstRho0).toBeLessThanOrEqual(1e-6);
+    fc.assert(
+      fc.property(fc.double({ min: -10, max: 30, noNaN: true }), fc.double({ min: 0, max: 0.99, noNaN: true }), fc.double({ min: 0.01, max: 3, noNaN: true }), (db, rho, step) => {
+        const lo = berNoncoherentCorrelated(db, rho);
+        const hi = berNoncoherentCorrelated(db + step, rho);
+        expect(Number.isFinite(lo) && Number.isFinite(hi)).toBe(true);
+        // Strictly decreasing while representable; above ~31 dB a value may underflow to 0.
+        if (hi > 0) expect(hi).toBeLessThan(lo);
+        else expect(lo).toBeGreaterThanOrEqual(0);
+        expect(berNoncoherentCorrelated(db, 0)).toBeCloseTo(berOrthogonalNoncoherent(db), 12);
+        // More correlation, more errors.
+        expect(berNoncoherentCorrelated(db, Math.min(1, rho + 0.005))).toBeGreaterThanOrEqual(berNoncoherentCorrelated(db, rho));
+      }),
+      { numRuns: NUM_RUNS },
+    );
+  });
+
+  it('FORWARD_RHO and the reference values of experiment E3c; edge cases', () => {
+    expect(FORWARD_RHO).toBeCloseTo(Math.sin((2 * Math.PI) / 3) / ((2 * Math.PI) / 3), 15);
+    expect(FORWARD_RHO).toBeCloseTo(0.4135, 4);
+    // docs/math.md section 3.5, formula column (4 significant digits).
+    for (const [db, ref] of [
+      [4, 1.692e-1],
+      [6, 9.42e-2],
+      [8, 3.931e-2],
+      [10, 1.078e-2],
+    ]) {
+      expect(Math.abs(berNoncoherentCorrelated(db, FORWARD_RHO) / ref - 1), `${db} dB`).toBeLessThan(5e-4);
+    }
+    expect(berOrthogonalNoncoherent(-Infinity)).toBe(0.5);
+    expect(berOrthogonalNoncoherent(Infinity)).toBe(0);
+    expect(berNoncoherentCorrelated(-Infinity, FORWARD_RHO)).toBe(0.5);
+    expect(berNoncoherentCorrelated(Infinity, FORWARD_RHO)).toBe(0);
+    expect(berNoncoherentCorrelated(10, 1)).toBeCloseTo(0.5, 12); // identical signals: guessing
+    expect(berNoncoherentCorrelated(10, -FORWARD_RHO)).toBe(berNoncoherentCorrelated(10, FORWARD_RHO));
+    for (const v of [berNoncoherentCorrelated(NaN, 0.4), berNoncoherentCorrelated(10, 1.01), berNoncoherentCorrelated(10, NaN), berOrthogonalNoncoherent(NaN)]) {
+      expect(Number.isNaN(v)).toBe(true);
+    }
+  });
+
+  it('the cancellation-free series equals the Marcum Q form, and marcumQ1 matches numerical integration', () => {
+    // Simpson integration of x exp(-(x^2 + a^2)/2) I0(a x) on [b, max(a, b) + 40].
+    const i0 = (x: number): number => {
+      let term = 1;
+      let sum = 1;
+      for (let k = 1; k < 2000 && term > sum * 1e-17; k++) {
+        term *= (x * x) / 4 / (k * k);
+        sum += term;
+      }
+      return sum;
+    };
+    const integral = (a: number, b: number): number => {
+      const top = Math.max(a, b) + 40;
+      const steps = 20000;
+      const h = (top - b) / steps;
+      const f = (x: number): number => x * Math.exp(-(x * x + a * a) / 2) * i0(a * x);
+      let s = f(b) + f(top);
+      for (let i = 1; i < steps; i++) s += f(b + i * h) * (i % 2 ? 4 : 2);
+      return (s * h) / 3;
+    };
+    for (const [a, b] of [
+      [0, 1],
+      [0.5, 1.5],
+      [1, 1],
+      [2, 3],
+      [3, 2],
+      [1.2, 4.5],
+    ]) {
+      expect(Math.abs(marcumQ1(a, b) - integral(a, b)), `Q1(${a}, ${b})`).toBeLessThan(1e-9);
+    }
+    for (const b of [0, 0.3, 1, 2.5, 4]) expect(marcumQ1(0, b)).toBeCloseTo(Math.exp((-b * b) / 2), 14);
+    for (const a of [0, 0.5, 3]) expect(marcumQ1(a, 0)).toBeCloseTo(1, 14);
+    expect(Number.isNaN(marcumQ1(-1, 1))).toBe(true);
+    // Series form of curve 2 against Q1(a, b) - 1/2 exp(-(a^2 + b^2)/2) I0(ab), where the
+    // difference is still well conditioned (BER >= 1e-8).
+    // Regression (slow-mode M12 counterexample): ab = 715 overflowed the I0 power series.
+    const r = berNoncoherentCorrelated(28.59085049818464 + 3, 0.99);
+    expect(r > 0 && r < 0.5).toBe(true);
+    // Up to 22 dB and |rho| = 0.9, ab goes beyond 25: the asymptotic branch is covered too.
+    for (let db = 0; db <= 22; db += 0.5) {
+      for (const rho of [0.1, FORWARD_RHO, 0.8, 0.9]) {
+        const g = 10 ** (db / 10);
+        const s = Math.sqrt(1 - rho * rho);
+        const a = Math.sqrt((g / 2) * (1 - s));
+        const b = Math.sqrt((g / 2) * (1 + s));
+        const direct = marcumQ1(a, b) - 0.5 * Math.exp(-(a * a + b * b) / 2) * i0(a * b);
+        const series = berNoncoherentCorrelated(db, rho);
+        if (direct < 1e-8) continue;
+        expect(Math.abs(series / direct - 1), `${db} dB rho ${rho}`).toBeLessThan(1e-7);
+      }
+    }
+  });
+
+  it('curve 3 file: public/data/ber-curve3.json has the format of design.md and consistent intervals', () => {
+    const data = JSON.parse(readFileSync(join(ROOT, 'public', 'data', 'ber-curve3.json'), 'utf8')) as {
+      ebN0Db: number[];
+      ber: number[];
+      lo: number[];
+      hi: number[];
+      bitsPerPoint: number[];
+      seeds: number;
+    };
+    expect(Object.keys(data).sort()).toEqual(['ber', 'bitsPerPoint', 'ebN0Db', 'hi', 'lo', 'seeds']);
+    const n = data.ebN0Db.length;
+    expect(n).toBeGreaterThan(5);
+    for (const k of ['ber', 'lo', 'hi', 'bitsPerPoint'] as const) expect(data[k]).toHaveLength(n);
+    expect(Number.isInteger(data.seeds) && data.seeds > 0).toBe(true);
+    for (let i = 0; i < n; i++) {
+      if (i > 0) expect(data.ebN0Db[i]).toBeGreaterThan(data.ebN0Db[i - 1]);
+      // Fewer bits are compared at low Eb/N0 (lost frames); at least 10 seeds x 5 000 remain.
+      expect(Number.isInteger(data.bitsPerPoint[i]) && data.bitsPerPoint[i] >= data.seeds * 5000).toBe(true);
+      expect(data.lo[i]).toBeLessThanOrEqual(data.ber[i]);
+      expect(data.ber[i]).toBeLessThanOrEqual(data.hi[i]);
+      // The interval is the 95 % Wilson interval of the pooled counts.
+      const errors = Math.round(data.ber[i] * data.bitsPerPoint[i]);
+      const w = wilson95(errors, data.bitsPerPoint[i]);
+      expect(data.lo[i]).toBeCloseTo(w.lo, 12);
+      expect(data.hi[i]).toBeCloseTo(w.hi, 12);
     }
   });
 });

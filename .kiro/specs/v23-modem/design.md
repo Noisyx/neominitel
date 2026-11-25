@@ -140,6 +140,10 @@ function berNoncoherentCorrelated(ebN0Db: number, rho: number): number;         
 ```
 Curve 3 is written by `scripts/montecarlo-ber.ts` to `public/data/ber-curve3.json` as `{ ebN0Db: number[]; ber: number[]; lo: number[]; hi: number[]; bitsPerPoint: number[]; seeds: number }`.
 
+Implementation (task 11; derivations and values in `docs/math.md` section 6):
+- `berNoncoherentCorrelated(ebN0Db, rho)` takes |rho| (a negative value gives the same result) and returns NaN for a NaN argument or |rho| > 1. It is evaluated with the Neumann series of Q₁, P_b = e^{−(b−a)²/2}·e^{−ab}I₀(ab)·(½ + Σ_{k≥1}(a/b)^k I_k/I₀). All terms are positive, so there is no cancellation at high Eb/N0. At ρ = 0 it is exactly curve 1. `marcumQ1` stays internal to `theory.ts` (cross-checks).
+- Curve 3: 16 kHz, adaptive threshold, AWGN at Eb/N0 from 0 to 18 dB in 1 dB steps, 10 seeds of at least 20 000 compared bits, `BerCounter` (framing slips included, like the live points of 3615 MATHS), errors pooled, 95 % Wilson interval. At 6 dB and below it reads above 0.5 (a counter artefact, see `docs/math.md` 6.3). The chain is in `tests/helpers/modem-ber.ts`, shared with M6 and `scripts/calibrate-modem.ts`.
+
 ### WAV API (`src/modem/wav.ts`)
 ```ts
 interface WavAudio { samples: Float32Array; sampleRate: number }                 // mono
@@ -249,7 +253,7 @@ Implementation choices (task 10, `src/modem/quality.ts`, `prbs.ts`, `demodulator
   | 12 dB | 2.2·10⁻³ | 3.9 % | 3.4·10⁻² |
   | 14 dB | 1.3·10⁻⁴ | 0.4 % | 3.6·10⁻³ |
 
-  Two gaps add up. The receiver's bit error rate at 12 dB is already above 10⁻³ (as E3b predicted). And with back-to-back frames, a lost or misaligned frame shifts the PN9 alignment by 7 bits: the specified counter then counts about 20 to 40 errors before resynchronising. So the counter's BER is 15 to 30 times the bit error rate. One idle bit between frames makes it worse (6.2·10⁻² at 12 dB). M6 is implemented as written and fails in slow mode until task 12 settles the target (Eb/N0, or the counting rule).
+  Two gaps add up. The receiver's bit error rate at 12 dB is already above 10⁻³ (as E3b predicted). And with back-to-back frames, a lost or misaligned frame shifts the PN9 alignment by 7 bits: the specified counter then counts about 20 to 40 errors before resynchronising. So the counter's BER is 15 to 30 times the bit error rate. One idle bit between frames makes it worse (6.2·10⁻² at 12 dB). **Resolved by calibration** (`docs/calibration.md` "M6", recorded per tech.md): the M6 Eb/N0 is 16.5 dB, the first 0.5 dB level at which 40 seeds pass at 8, 16 and 48 kHz in both modes; the receiver, the counting rule and the 10⁻³ target are unchanged.
 
 ### PN9 and BER
 - LFSR x⁹ + x⁵ + 1, seed 0x1FF, period 511. Bits are packed 7 per frame, least significant first.
@@ -273,7 +277,7 @@ These notes are for the mathematician to check and extend.
 | M3 | Phase continuity: |x[n+1] − x[n]| ≤ A·2π·f_max/fs + 1e-6 for all n. |
 | M4 | Parity: every generated frame has even weight over data + parity. Inverting any single data or parity line bit (line bits 1 to 8) of a frame (`bitErrors`) yields `parityOk = false` for that frame. Inverting the start bit (bit 0) or the stop bit (bit 9) is outside this property: a start-bit inversion loses the frame, and a stop-bit inversion yields `framingOk = false` and may lose the following frame. Both behaviours are covered by characterization tests. |
 | M5 | Chunk invariance: for any partition of the input into chunks, the event list is identical. |
-| M6 | Noise: at Eb/N0 ≥ 12 dB (target, to calibrate), BER on 20 000 PN9 bits is ≤ 1e-3 for 20 seeds. |
+| M6 | Noise: at Eb/N0 ≥ 16.5 dB (calibrated; design target 12 dB, see `docs/calibration.md` "M6"), BER on 20 000 PN9 bits is ≤ 1e-3 for 20 seeds. |
 | M7 | Offset: in adaptive mode, for any offset in [−400, +400] Hz at 20 dB SNR, bytes are decoded without error and \|offsetHz − true offset\| ≤ 20. |
 | M8 | Clock: for any clock error in [−2%, +2%], bytes are decoded without error at 20 dB SNR (γ_3k, see "UART"). |
 | M9 | WAV: readWav(writeWav(x)) equals x quantized to 16 bits. |

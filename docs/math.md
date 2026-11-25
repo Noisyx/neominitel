@@ -287,7 +287,7 @@ filter c1 Hamming); 400,000 bits per condition. Equivalence margin ±10 % relati
 
 | Item | Statement | Status | Checked by |
 |---|---|---|---|
-| M6 target | BER ≤ 10⁻³ at Eb/N0 = 12 dB for each of 20 seeds of 20,000 bits may need a higher Eb/N0. | Measured in task 10, not met: 3.4·10⁻² with `BerCounter` (data-bit BER 2.2·10⁻³ plus 7-bit framing slips); figures in design.md "Quality", M6 gap | Task 12 (decision U6) |
+| M6 target | BER ≤ 10⁻³ at Eb/N0 = 12 dB for each of 20 seeds of 20,000 bits may need a higher Eb/N0. | Confirmed: not met at 12 dB (3.2·10⁻² with `BerCounter`: data-bit BER 2.2·10⁻³ plus 7-bit framing slips). Calibrated to 16.5 dB | `docs/calibration.md` "M6" |
 | M10 | M2M4 estimator within ±1 dB from 0 to 30 dB band SNR; the 30 dB end needs an envelope CV ≲ 2 %. | Refuted for the plain estimator (clean FSK reads 22.8 dB); met with the kurtosis-corrected estimator (k_s = 1.0105) averaged over 1 s, task 10 | Task 10 (design.md "Quality") |
 | M7 | The adaptive mark estimate needs the central-half-bit mean (not the whole bit) to stay within ±20 Hz. | Hypothesis | E4 / task 8 |
 | M4 | A start-bit inversion loses the frame; a stop-bit inversion gives `framingOk = false` and may lose the next frame. | Hypothesis (spec amended) | Characterization tests, J3-3 |
@@ -295,3 +295,99 @@ filter c1 Hamming); 400,000 bits per condition. Equivalence margin ±10 % relati
 ## 5. Hardware measurements
 
 None yet. The first phone to laptop test is planned for J6.
+
+---
+
+## 6. Theory curves (task 11, `src/modem/theory.ts`)
+
+Notation of section 2.2: γ = Eb/N0 per line bit, linear. All three curves are plotted against the
+same γ, so they can be compared directly with the live points of 3615 MATHS.
+
+### 6.1 Curve 1, orthogonal non-coherent BFSK
+
+Two orthogonal tones (|ρ| = 0), each received through a matched filter followed by an envelope
+detector; the larger envelope wins. The textbook result is P_b = ½·exp(−γ/2)
+(`berOrthogonalNoncoherent`). It is the reference that every non-coherent FSK receiver is compared
+with. (`Identity`, standard result.)
+
+### 6.2 Curve 2, non-coherent binary signals with correlation ρ
+
+**Why V.23 is not orthogonal.** Over one bit of length T, the two tones f₁ and f₂ have the
+normalised complex correlation ρ = (1/T)∫₀ᵀ e^{j2π(f₂−f₁)t} dt, so
+|ρ| = |sin(πh)/(πh)| with h = (f₂ − f₁)·T. Forward channel: h = 800/1200 = 2/3, so
+**|ρ| = (√3/2)/(2π/3) = 0.4135** (`FORWARD_RHO`, derived from `v23.ts`). (`Identity`)
+
+**Formula.** For two equal-energy signals with correlation |ρ| and envelope detection:
+
+P_b = Q₁(a, b) − ½·e^{−(a²+b²)/2}·I₀(ab),  a, b = √(γ/2 · (1 ∓ √(1 − |ρ|²)))
+
+(standard result for non-orthogonal non-coherent binary signalling, still to be confirmed by the
+mathematician as design.md asks; `Prototype result (E3c)` in section 3.5: compatible with a
+two-symbol simulation at 4 to 10 dB.) Checks:
+
+- |ρ| = 0: a = 0, b = √γ, Q₁(0, b) = e^{−b²/2} and I₀(0) = 1, so P_b = e^{−γ/2} − ½e^{−γ/2} =
+  ½e^{−γ/2}, curve 1. (`Identity`)
+- |ρ| = 1: a = b, and P_b = ½ (the signals are identical; the receiver guesses). (`Identity`)
+
+**Numerical form used in the code (no cancellation).** The two terms of the formula are almost
+equal when γ is large, so their difference loses digits. The Neumann series of the Marcum Q
+function, Q₁(a, b) = e^{−(a²+b²)/2}·Σ_{k≥0} (a/b)^k I_k(ab) for 0 ≤ a < b, gives
+
+P_b = e^{−(a²+b²)/2}·[½·I₀(ab) + Σ_{k≥1} (a/b)^k I_k(ab)]
+  = e^{−(b−a)²/2} · [e^{−ab} I₀(ab)] · (½ + Σ_{k≥1} (a/b)^k I_k(ab)/I₀(ab)),
+
+using (a² + b²)/2 = (b − a)²/2 + ab. Every term is positive. The ratios I_k/I₀ come from Miller's
+backward recurrence I_{k−1}(x) = I_{k+1}(x) + (2k/x)·I_k(x), which is stable downwards; e^{−x}I₀(x)
+from its power series for x ≤ 25 and from the asymptotic expansion
+(2πx)^{−½}·Σ_k [(2k−1)!!]²/(k!·(8x)^k) above (the power series overflows near x ≈ 700, reached at
+31.6 dB with |ρ| = 0.99; found by the slow M12 run). (`Identity`; the code is checked against Q₁(a, b) − ½e^{−(a²+b²)/2}I₀(ab)
+within 10⁻⁷ relative wherever P_b ≥ 10⁻⁸, and Q₁ against numerical integration within 10⁻⁹.)
+
+**Properties (property M12, checked numerically in the tests, not proven here).** Curves 1 and 2
+decrease strictly in γ from −10 to 30 dB; curve 2 at ρ = 0 equals curve 1 (difference 0, the
+series reduces exactly); curve 2 is above curve 1 and grows with |ρ|.
+
+Values from the code (curves 1 and 2) and from `public/data/ber-curve3.json` (curve 3):
+
+| Eb/N0 | Curve 1 | Curve 2 (\|ρ\| = 0.4135) | Curve 3 (95 % interval) |
+|---|---|---|---|
+| 2 dB | 2.26·10^-1 | 2.49·10^-1 | 6.65·10^-1 [6.62·10^-1, 6.68·10^-1] |
+| 4 dB | 1.42·10^-1 | 1.69·10^-1 | 6.35·10^-1 [6.32·10^-1, 6.38·10^-1] |
+| 6 dB | 6.83·10^-2 | 9.42·10^-2 | 5.51·10^-1 [5.48·10^-1, 5.53·10^-1] |
+| 8 dB | 2.13·10^-2 | 3.93·10^-2 | 3.74·10^-1 [3.71·10^-1, 3.76·10^-1] |
+| 10 dB | 3.37·10^-3 | 1.08·10^-2 | 1.58·10^-1 [1.56·10^-1, 1.60·10^-1] |
+| 12 dB | 1.81·10^-4 | 1.56·10^-3 | 3.23·10^-2 [3.15·10^-2, 3.30·10^-2] |
+| 14 dB | 1.76·10^-6 | 8.30·10^-5 | 3.20·10^-3 [2.97·10^-3, 3.44·10^-3] |
+| 16 dB | 1.13·10^-9 | 8.97·10^-7 | 9.82·10^-5 [6.49·10^-5, 1.49·10^-4] |
+| 18 dB | 9.95·10^-15 | 7.77·10^-10 | 0 [0, 1.72·10^-5] |
+
+### 6.3 Curve 3, our receiver (Monte Carlo)
+
+`scripts/montecarlo-ber.ts` runs the full chain of the app: PN9 frames → `modulate` (16 kHz) →
+`applyChannel` with AWGN at γ (A7) → streaming demodulator (adaptive threshold, the app default)
+→ `BerCounter`, the counter that 3615 MATHS uses, so live points and curve 3 measure the same
+thing. Per Eb/N0 (0 to 18 dB, 1 dB steps): 10 seeds of at least 20 000 compared bits, errors and
+bits pooled, 95 % Wilson interval. Output: `public/data/ber-curve3.json` (format of design.md
+"Theory API"). The sampling rate does not change the BER at fixed γ (E3b, section 3.6).
+
+Two cautions for the reader of the plot:
+
+- **What is counted.** `BerCounter` counts data-bit errors *and* the 20 to 40 errors that follow a
+  lost or misaligned frame before it resynchronises (design.md "Quality", M6 gap). Curve 3 is
+  therefore above the receiver's raw bit error rate, by a factor 15 to 30 near 12 dB.
+- **The intervals are optimistic.** The Wilson interval assumes independent bits. The errors of
+  one framing slip come in a burst, so the true uncertainty is wider than the band shown.
+  (`Hypothesis`, not quantified.)
+
+Reading of the measured curve 3 (`public/data/ber-curve3.json`, 10 seeds per point, 16 kHz):
+
+- **At 6 dB and below, curve 3 is above 0.5** (0.55 at 6 dB, 0.68 at 0 dB). Most frames then have a framing
+  error, the counter counts all 7 of their bits as errors, and it keeps losing its lock. Curve 3
+  is the reading of the app's counter, not a bit error probability, in that region.
+- **Price of the real receiver.** At 12 dB, curve 3 is 3.2·10⁻² against 1.6·10⁻³ for curve 2: the
+  raw bit error rate (2.2·10⁻³, design.md "Quality") is close to curve 2, and the framing slips
+  multiply the counted errors by about 15. Curve 3 reaches 10⁻³ near 14.7 dB, about 2.4 dB to the
+  right of curve 2 (12.3 dB); both values are log-linear interpolations between 1 dB (curve 3)
+  and 2 dB (curve 2) table points.
+- The open question of section 3.6 (the reference detector beating curve 2 at 9 dB) concerns the
+  raw bit error rate of a detector with known timing, so it is not answered by curve 3.
