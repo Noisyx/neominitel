@@ -1,4 +1,5 @@
 import type { ReactElement, ReactNode } from 'react';
+import { CHANNELS } from '../../modem';
 
 export interface MinitelShellProps {
   online: boolean;
@@ -18,7 +19,9 @@ export function MinitelShell({
   children,
   footerSlot,
 }: MinitelShellProps): ReactElement {
-  const label = statusLabel ?? (online ? 'En ligne · 1200 / 75 bd' : 'Veille');
+  const label =
+    statusLabel ??
+    (online ? `En ligne · ${CHANNELS.forward.baud} / ${CHANNELS.backward.baud} bd` : 'Veille');
 
   return (
     <section className="nm-shell" aria-label="Terminal NeoMinitel">

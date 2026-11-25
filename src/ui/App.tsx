@@ -7,7 +7,7 @@ import {
   type ReactElement,
 } from 'react';
 import { createGaplessPlayer, type GaplessPlayer } from '../audio/playback';
-import type { DiagEvent, QualityEvent } from '../modem';
+import { ANSWER_TONE_HZ, CHANNELS, FRAME, type DiagEvent, type QualityEvent } from '../modem';
 import {
   cloneCell,
   createBlankScreen,
@@ -395,17 +395,19 @@ export function App(): ReactElement {
     state.session === 'start'
       ? 'Veille'
       : state.session === 'connecting'
-        ? 'Appel V.23 · 2100 Hz…'
+        ? `Appel V.23 · ${ANSWER_TONE_HZ} Hz…`
         : state.carrierOn
-          ? 'Porteuse V.23 · 1200 bd (120 car/s)'
-          : 'En ligne · 1200 / 75 bd';
+          ? `Porteuse V.23 · ${CHANNELS.forward.baud} bd (${CHANNELS.forward.baud / FRAME.bitsPerFrame} car/s)`
+          : `En ligne · ${CHANNELS.forward.baud} / ${CHANNELS.backward.baud} bd`;
 
   return (
     <div className="nm-app">
       <header className="nm-topbar">
         <div className="nm-brand">
           <h1 className="nm-brand-title">NeoMinitel</h1>
-          <span className="nm-brand-meta">Mode Seul · V.23 1200 / 75 bauds</span>
+          <span className="nm-brand-meta">
+            {`Mode Seul · V.23 ${CHANNELS.forward.baud} / ${CHANNELS.backward.baud} bauds`}
+          </span>
         </div>
 
         <div className="nm-toolbar" role="toolbar" aria-label="Réglages du terminal">
