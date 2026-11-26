@@ -368,11 +368,11 @@ export function BerChart({ points, onClearPoints }: BerChartProps): ReactElement
 
       {latest ? (
         <p className="nm-vote-note">
-          {`Dernier point (${latest.ebN0Db.toFixed(1)} dB) : BER ${formatSciBer(latest.ber)} [${formatSciBer(latest.lo)} – ${formatSciBer(latest.hi)}] sur ${latest.bits} bits.`}
+          {`Dernier point (${latest.ebN0Db.toFixed(1)} dB) : BER ${formatSciBer(latest.ber)} [${formatSciBer(latest.lo)} – ${formatSciBer(latest.hi)}] sur ${latest.bits} bits`}
         </p>
       ) : (
         <p className="nm-vote-note">
-          Ouvrez 3615 MATHS → BANC pour émettre la séquence PN9 et placer les points mesurés.
+          Ouvrez 3615 MATHS → BANC pour émettre la séquence PN9 et tracer les points
         </p>
       )}
 

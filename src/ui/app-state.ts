@@ -202,7 +202,7 @@ export function createInitialUiState(standby: Screen): UiState {
     threshold: 'fixed',
     voteOn: true,
     votes: createEmptyVoteStore(),
-    hudVisible: true,
+    hudVisible: false,
     errors: { parity: 0, framing: 0 },
     cps: 0,
     rxHistory: [],
@@ -372,6 +372,10 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
       const nextBase =
         isWavOutput && !sameWav ? createBlankScreen() : state.baseScreen;
 
+      const enteringMaths =
+        action.router.activeServiceId === 'MATHS' &&
+        state.router?.activeServiceId !== 'MATHS';
+
       return {
         ...state,
         session: state.session === 'start' ? 'connecting' : 'online',
@@ -379,6 +383,7 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
         baseScreen: nextBase,
         shown: overlayInputFieldOnScreen(nextBase, undefined, ''),
         pageComplete: false,
+        hudVisible: enteringMaths ? true : state.hudVisible,
         votes: nextVotes,
         cps: 0,
         rxHistory: [],

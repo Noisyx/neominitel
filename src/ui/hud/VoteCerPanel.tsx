@@ -86,12 +86,12 @@ export function VoteCerPanel({
             </tbody>
           </table>
           <p className="nm-vote-note">
-            {'Parité 7E1 : 1 bit détecte toute erreur simple ; P(non détectée) ≈ C(8,2)·ε² = 28·ε².'}
+            {'Parité 7E1 : 1 bit détecte toute erreur simple · P(non détectée) ≈ 28·ε²'}
           </p>
         </>
       ) : (
         <p className="nm-vote-note">
-          Cumulez plusieurs réceptions en mode Seul (avec bruit Eb/N0) pour comparer le taux mesuré aux formules p^N et majorité.
+          Cumulez plusieurs réceptions en mode Seul pour comparer le taux mesuré aux formules p^N et majorité
         </p>
       )}
 
