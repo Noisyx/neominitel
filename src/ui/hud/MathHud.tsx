@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useRef,
   useState,
   type MutableRefObject,
   type ReactElement,
@@ -73,17 +74,20 @@ export function MathHud({
   const hasMathsPanels =
     showBerChart || berPoints.length > 0 || showVoteCerPanel;
   const hasSimTab = Boolean(simSlot);
-  const [activeTab, setActiveTab] = useState<HudBenchTab>('signal');
+  const [activeTab, setActiveTab] = useState<HudBenchTab>(
+    showBerChart ? 'maths' : 'signal',
+  );
+  const prevShowBerChartRef = useRef(showBerChart);
 
+  // Jump to the BER tab only when 3615 MATHS opens (false -> true), so the user
+  // can still pick another tab afterwards. Unavailable tabs fall back to 'signal'
+  // through `resolvedTab` below.
   useEffect(() => {
-    if (showBerChart) {
+    if (showBerChart && !prevShowBerChartRef.current) {
       setActiveTab('maths');
-    } else if (!hasMathsPanels && activeTab === 'maths') {
-      setActiveTab('signal');
-    } else if (!hasSimTab && activeTab === 'sim') {
-      setActiveTab('signal');
     }
-  }, [showBerChart, hasMathsPanels, hasSimTab, activeTab]);
+    prevShowBerChartRef.current = showBerChart;
+  }, [showBerChart]);
 
   if (!visible) {
     return (
@@ -211,7 +215,6 @@ export function MathHud({
 
       {resolvedTab === 'maths' && (
         <div className="nm-hud-scopes">
-          {simSlot}
           <div
             className="nm-hud-maths-grid"
             data-two-col={

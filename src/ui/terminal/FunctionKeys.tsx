@@ -124,6 +124,7 @@ export function FunctionKeys({ online, onPressKey }: FunctionKeysProps): ReactEl
             type="button"
             className={`nm-keycap${variantClass}`}
             disabled={disabled}
+            title={`${item.label} · clavier : ${item.shortcut}`}
             onClick={() => onPressKey(item.key)}
           >
             <span className="nm-keycap-label">{item.label}</span>
