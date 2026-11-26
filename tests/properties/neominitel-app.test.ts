@@ -45,6 +45,11 @@ import {
   evaluateRawAudioSettings,
   RAW_AUDIO_CONSTRAINTS,
 } from '../../src/audio/capture';
+import {
+  createGaplessPlayer,
+  resampleBlockForPlayback,
+  type AudioContextConstructor,
+} from '../../src/audio/playback';
 import { MicPermission } from '../../src/ui/screens/MicPermission';
 import { LINE_MODE_OPTIONS } from '../../src/ui/screens/ModeBar';
 import { SimControls } from '../../src/ui/screens/SimControls';
@@ -1397,5 +1402,276 @@ describe('neominitel-app Property Tests', () => {
     expect(report.issues).toEqual([]);
     expect(report.ok).toBe(true);
     expect(report.maxSimilarity).toBeLessThan(MAX_PAIRWISE_PAGE_SIMILARITY);
+  });
+});
+
+describe('GaplessPlayer Web Audio resilience (gesture unlock, Safari interrupted, 16->48 kHz resampling, non-blocking autoplay)', () => {
+  interface ScheduledRecord {
+    readonly sampleRate: number;
+    readonly length: number;
+    readonly startAt: number;
+    readonly peak: number;
+    triggerEnded(): void;
+  }
+
+  function createMockAudioEnv(options?: {
+    hwSampleRate?: number;
+    initialState?: string;
+    hangResume?: boolean;
+  }) {
+    const hwSampleRate = options?.hwSampleRate ?? 48000;
+    let state = options?.initialState ?? 'suspended';
+    let currentTime = 0;
+    let resumeCalls = 0;
+    let closeCalls = 0;
+    let gainValue = 1;
+    const scheduled: ScheduledRecord[] = [];
+    let stateChangeHandler: (() => void) | null = null;
+
+    class MockAudioContext {
+      sampleRate = hwSampleRate;
+      destination = {};
+      get state(): string {
+        return state;
+      }
+      get currentTime(): number {
+        return currentTime;
+      }
+      set onstatechange(fn: (() => void) | null) {
+        stateChangeHandler = fn;
+      }
+      get onstatechange(): (() => void) | null {
+        return stateChangeHandler;
+      }
+      createGain() {
+        return {
+          gain: {
+            get value(): number {
+              return gainValue;
+            },
+            set value(v: number) {
+              gainValue = v;
+            },
+            cancelScheduledValues(): void {
+              // no-op
+            },
+            setValueAtTime(v: number): void {
+              gainValue = v;
+            },
+          },
+          connect(): void {
+            // no-op
+          },
+        };
+      }
+      createBuffer(_channels: number, length: number, rate: number) {
+        const data = new Float32Array(length);
+        return {
+          length,
+          sampleRate: rate,
+          duration: length / rate,
+          getChannelData: () => data,
+        };
+      }
+      createBufferSource() {
+        let assignedBuffer: {
+          length: number;
+          sampleRate: number;
+          getChannelData: () => Float32Array;
+        } | null = null;
+        const node = {
+          onended: null as (() => void) | null,
+          set buffer(b: typeof assignedBuffer) {
+            assignedBuffer = b;
+          },
+          get buffer() {
+            return assignedBuffer;
+          },
+          connect(): void {
+            // no-op
+          },
+          disconnect(): void {
+            // no-op
+          },
+          start(when = 0): void {
+            if (!assignedBuffer) return;
+            const samples = assignedBuffer.getChannelData();
+            let peak = 0;
+            for (let i = 0; i < samples.length; i++) {
+              const a = Math.abs(samples[i]);
+              if (a > peak) peak = a;
+            }
+            scheduled.push({
+              sampleRate: assignedBuffer.sampleRate,
+              length: assignedBuffer.length,
+              startAt: when,
+              peak,
+              triggerEnded: () => node.onended?.(),
+            });
+          },
+          stop(): void {
+            // no-op
+          },
+        };
+        return node;
+      }
+      resume(): Promise<void> {
+        resumeCalls++;
+        if (options?.hangResume) {
+          return new Promise<void>(() => {
+            // Simulates Chrome/Safari hanging resume() when called outside user gesture
+          });
+        }
+        state = 'running';
+        stateChangeHandler?.();
+        return Promise.resolve();
+      }
+      close(): Promise<void> {
+        closeCalls++;
+        state = 'closed';
+        return Promise.resolve();
+      }
+    }
+
+    return {
+      Ctor: MockAudioContext as unknown as AudioContextConstructor,
+      scheduled,
+      getResumeCalls: () => resumeCalls,
+      getCloseCalls: () => closeCalls,
+      getGainValue: () => gainValue,
+      setState: (next: string) => {
+        state = next;
+        stateChangeHandler?.();
+      },
+      advanceTime: (dtSec: number) => {
+        currentTime += dtSec;
+      },
+    };
+  }
+
+  it('unlocks Safari interrupted & suspended states, resamples 16 kHz WAV blocks cleanly to 48 kHz hardware rate, and resets cleanly', async () => {
+    const env = createMockAudioEnv({
+      hwSampleRate: 48000,
+      initialState: 'interrupted',
+    });
+    const player = createGaplessPlayer({
+      initialMuted: false,
+      audioContextCtor: env.Ctor,
+      resumeTimeoutMs: 25,
+    });
+
+    // Synchronous gesture unlock recovers from Safari's 'interrupted' state immediately
+    player.unlockFromGesture();
+    expect(env.getResumeCalls()).toBeGreaterThanOrEqual(1);
+    expect(env.getGainValue()).toBe(1);
+
+    const activeRate = await player.ensureStarted();
+    expect(activeRate).toBe(48000);
+
+    // Schedule two consecutive 100 ms blocks of a 16 kHz WAV (1600 samples each)
+    const wavBlock0 = new Float32Array(1600);
+    const wavBlock1 = new Float32Array(1600);
+    for (let i = 0; i < 1600; i++) {
+      wavBlock0[i] = 0.5 * Math.sin((2 * Math.PI * 1000 * i) / 16000);
+      wavBlock1[i] = 0.5 * Math.sin((2 * Math.PI * 1000 * (1600 + i)) / 16000);
+    }
+
+    const acked: number[] = [];
+    player.scheduleBlock({
+      id: 7,
+      audio: wavBlock0,
+      startSample: 0,
+      sampleRate: 16000,
+      onEnded: (id) => acked.push(id),
+    });
+    player.scheduleBlock({
+      id: 7,
+      audio: wavBlock1,
+      startSample: 1600,
+      sampleRate: 16000,
+      onEnded: (id) => acked.push(id),
+    });
+
+    // Filter out the 1-sample silent gesture unlock buffer
+    const realBuffers = env.scheduled.filter((b) => b.length > 1);
+    expect(realBuffers.length).toBe(2);
+    // Both buffers are created at native 48000 Hz (4800 samples = 0.100 s each) with audible signal
+    expect(realBuffers[0].sampleRate).toBe(48000);
+    expect(realBuffers[0].length).toBe(4800);
+    expect(realBuffers[0].peak).toBeGreaterThan(0.45);
+    expect(realBuffers[1].sampleRate).toBe(48000);
+    expect(realBuffers[1].length).toBe(4800);
+    expect(realBuffers[1].startAt).toBeCloseTo(realBuffers[0].startAt + 0.1, 6);
+
+    // Sample clock still advances in stream units (16 kHz -> 1600 samples per 0.1 s)
+    env.advanceTime(0.12);
+    expect(player.currentSample()).toBe(1600);
+
+    realBuffers[0].triggerEnded();
+    expect(acked).toEqual([7]);
+
+    // Mute & unmute update GainNode immediately
+    player.setMuted(true);
+    expect(env.getGainValue()).toBe(0);
+    player.setMuted(false);
+    expect(env.getGainValue()).toBe(1);
+
+    // resetContext closes the old AudioContext so leaving Écoute recreates a fresh speaker context
+    player.resetContext();
+    expect(env.getCloseCalls()).toBe(1);
+    player.dispose();
+  });
+
+  it('never hangs ensureStarted() or freezes block acks when browser autoplay blocks resume()', async () => {
+    const blockedEnv = createMockAudioEnv({
+      hwSampleRate: 44100,
+      initialState: 'suspended',
+      hangResume: true,
+    });
+    const player = createGaplessPlayer({
+      audioContextCtor: blockedEnv.Ctor,
+      resumeTimeoutMs: 20,
+    });
+
+    const t0 = Date.now();
+    const rate = await player.ensureStarted();
+    expect(rate).toBe(44100);
+    expect(Date.now() - t0).toBeLessThan(250);
+
+    // Even while AudioContext is stuck suspended, wall-clock fallback fires onEnded so worker never deadlocks
+    const endedPromise = new Promise<number>((resolve) => {
+      player.scheduleBlock({
+        id: 42,
+        audio: new Float32Array(441),
+        startSample: 0,
+        sampleRate: 44100,
+        onEnded: (id) => resolve(id),
+      });
+    });
+    expect(await endedPromise).toBe(42);
+
+    // Once user clicks and AudioContext transitions to running, next block immediately plays on hardware
+    blockedEnv.setState('running');
+    const audibleBlock = new Float32Array(441).fill(0.4);
+    player.scheduleBlock({
+      id: 42,
+      audio: audibleBlock,
+      startSample: 441,
+      sampleRate: 44100,
+    });
+    const hardwareBlocks = blockedEnv.scheduled.filter((b) => b.length === 441);
+    expect(hardwareBlocks.length).toBe(1);
+    expect(hardwareBlocks[0].peak).toBeCloseTo(0.4, 5);
+    player.dispose();
+
+    // Pure resampler check for odd non-integer ratios (16000 -> 44100 Hz)
+    const resampled = resampleBlockForPlayback(
+      new Float32Array(1600).fill(0.25),
+      0,
+      16000,
+      44100,
+    );
+    expect(resampled.length).toBe(4410);
+    expect(resampled[2000]).toBeCloseTo(0.25, 6);
   });
 });
