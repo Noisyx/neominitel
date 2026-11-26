@@ -4,7 +4,7 @@
 // only createDemodulator is exported, from task 7 on (decision T7-8).
 import { createDetector } from './carrier';
 import { createDiscriminator, type DiscriminatorOutput } from './discriminator';
-import { ADAPTIVE_INIT_MAX_OFFSET_HZ, ADAPTIVE_INIT_MAX_STD_HZ, ADAPTIVE_INIT_MS, ADAPTIVE_INIT_TIMEOUT_MS, createThresholdSource, type ThresholdMode, type ThresholdState } from './threshold';
+import { ADAPTIVE_INIT_MAX_OFFSET_GAP, ADAPTIVE_INIT_MAX_STD_GAP, ADAPTIVE_INIT_MS, ADAPTIVE_INIT_TIMEOUT_MS, createThresholdSource, type ThresholdMode, type ThresholdState } from './threshold';
 import type { DemodEvent, DemodOptions, ModemError, Result, StreamingDemodulator } from './types';
 import { m2m4, parityErrorRate, snrReport } from './quality';
 import { createUart, type UartChar } from './uart';
@@ -32,9 +32,9 @@ interface Sample {
  * Creates the streaming demodulator.
  *
  * Validation (design.md "Factory" and "Threshold mode"): `bad-sample-rate` when sampleRate is not
- * finite or outside 8 000..96 000 Hz; `bad-option` for an unknown channel, for the backward
- * channel until task 14 (decision T7-7), for a threshold other than 'fixed' or 'adaptive', and for
- * a non-finite carrierOnDbfs. `threshold` defaults to 'adaptive' (task 8, design.md "Threshold");
+ * finite or outside 8 000..96 000 Hz; `bad-option` for an unknown channel, for a threshold other
+ * than 'fixed' or 'adaptive', and for a non-finite carrierOnDbfs. Both channels are supported from
+ * task 14 (design.md "Backward channel"); `connect` is reported on the forward channel only. `threshold` defaults to 'adaptive' (task 8, design.md "Threshold");
  * `carrierOnDbfs` defaults to -45 under the D6 reference (decision T7-1).
  *
  * `push` runs the discriminator, the carrier and answer-tone detector, and the UART. The UART
@@ -71,12 +71,6 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
   const channel = o?.channel ?? 'forward';
   const disc = createDiscriminator(o?.sampleRate, channel);
   if (!disc.ok) return disc;
-  if (channel !== 'forward') {
-    return {
-      ok: false,
-      error: { kind: 'bad-option', option: 'channel', reason: 'the backward channel is not available before task 14' },
-    };
-  }
   // From task 8, threshold defaults to 'adaptive'; 'fixed' stays supported (design.md
   // "Threshold mode"). Any other value is a bad option.
   const initialMode: ThresholdMode = o.threshold ?? 'adaptive';
@@ -92,7 +86,12 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
   }
 
   const d = disc.value;
-  const spec = CHANNELS.forward;
+  const spec = CHANNELS[channel];
+  // Task 14: the steady-window gates are fractions of the tone gap (500 Hz forward, 37.5 Hz backward).
+  const toneGapHz = spec.spaceHz - spec.markHz;
+  const initMaxStdHz = ADAPTIVE_INIT_MAX_STD_GAP * toneGapHz;
+  const initMaxOffsetHz = ADAPTIVE_INIT_MAX_OFFSET_GAP * toneGapHz;
+  const envelopeKurtosis = channel === 'forward' ? QUALITY.forwardEnvelopeKurtosis : QUALITY.backwardEnvelopeKurtosis;
   const detector = createDetector(d.sampleRate, d.decimation, carrierOnDbfs);
   const threshold = createThresholdSource(spec, initialMode);
   const uart = createUart(d, threshold);
@@ -173,7 +172,7 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
   /** Computes the crossed estimates (every frame decided before B is known now). */
   function emitQuality(): void {
     for (const q of pendingQuality) {
-      const est = m2m4(q.s2 / q.c, q.s4 / q.c, QUALITY.forwardEnvelopeKurtosis);
+      const est = m2m4(q.s2 / q.c, q.s4 / q.c, envelopeKurtosis);
       awaitingQuality.push({
         type: 'quality',
         atSample: q.at,
@@ -352,7 +351,7 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
           // turn the carrier on). Otherwise the next window, starting at this estimate, is tried.
           const mean = initCount > 0 ? initSum / initCount : NaN;
           const std = initCount > 0 ? Math.sqrt(Math.max(0, initSumSq / initCount - mean * mean)) : NaN;
-          if (std <= ADAPTIVE_INIT_MAX_STD_HZ && Math.abs(mean - spec.markHz) <= ADAPTIVE_INIT_MAX_OFFSET_HZ) {
+          if (std <= initMaxStdHz && Math.abs(mean - spec.markHz) <= initMaxOffsetHz) {
             pushToUart(slice);
             threshold.initMark(mean);
             initStart = NaN;
@@ -440,7 +439,9 @@ export function createDemodulator(o: DemodOptions): Result<StreamingDemodulator,
       hold({ type: 'carrier', on: ev.on, atSample: atIndex(ev.atSample) });
     }
     feedUart(samples, cursor, Infinity);
-    for (const ev of detected.connect) hold({ type: 'connect', atSample: atIndex(ev.atSample) });
+    // The 2100 Hz answer tone belongs to the forward call set-up (requirement 3.3): the backward
+    // demodulator does not report it.
+    if (channel === 'forward') for (const ev of detected.connect) hold({ type: 'connect', atSample: atIndex(ev.atSample) });
     if (endOfInput !== undefined) crossQuality(endOfInput);
     // Before the diags: a diag prunes the threshold states that the offset of an estimate reads.
     emitQuality();
