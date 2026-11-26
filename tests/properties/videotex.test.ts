@@ -84,6 +84,8 @@ import {
 import { cloneScreen } from '../../src/videotex/screen';
 import { changedRowIndices } from '../helpers/screen-diff';
 import { isSlowTestsEnabled } from '../helpers/arbitraries';
+import { imageToMosaic, resampleToBlocks, type RgbImage } from '../../src/videotex/image-mosaic';
+import { COLOUR_PALETTE_RGB } from '../../src/videotex/codes';
 
 function assertUniqueTableValues(
   table: Record<string, number>,
@@ -1116,5 +1118,195 @@ describe('Videotex Property Tests', () => {
     expect(byRow[3]).toBeCloseTo(2 / 40, 8);
     expect(byRow[1]).toBe(0);
     expect(cellErrorRate(damaged, ref)).toBeCloseTo(2 / 1000, 8);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 9: image to mosaic (requirement 6.3, design.md "Mosaic from image", Role B)
+
+describe('Videotex Task 9: image to mosaic', () => {
+  const mosaicRuns = (fast: number, slow: number): number => (isSlowTestsEnabled() ? slow : fast);
+
+  /** An RGB image of exactly 2*cols x 3*rows pixels (one pixel per block). */
+  function blockImage(cols: number, rows: number, rgb: readonly number[]): RgbImage {
+    return { width: cols * 2, height: rows * 3, data: Uint8Array.from(rgb), channels: 3 };
+  }
+
+  const sq = (a: readonly number[], b: readonly number[]): number => (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
+
+  it('V12 image to mosaic optimality: without diffusion, each cell keeps the pair (or single colour) of least squared error over its six blocks', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 6 }),
+        fc.integer({ min: 1, max: 4 }),
+        fc.array(fc.integer({ min: 0, max: 255 }), { minLength: 12 * 12 * 3, maxLength: 12 * 12 * 3 }),
+        (cols, rows, pool) => {
+          const n = cols * 2 * rows * 3 * 3;
+          const img = blockImage(cols, rows, pool.slice(0, n));
+          const res = imageToMosaic(img, cols, rows);
+          expect(res.ok).toBe(true);
+          if (!res.ok) return;
+          let total = 0;
+          for (let cr = 0; cr < rows; cr++) {
+            for (let cc = 0; cc < cols; cc++) {
+              const px: number[][] = [];
+              for (let k = 0; k < 6; k++) {
+                const x = cc * 2 + (k % 2);
+                const y = cr * 3 + Math.floor(k / 2);
+                const i = (y * cols * 2 + x) * 3;
+                px.push([img.data[i], img.data[i + 1], img.data[i + 2]]);
+              }
+              // Brute force over the 8 singles and 28 pairs.
+              let best = Infinity;
+              for (let a = 0; a < 8; a++) {
+                for (let b = a; b < 8; b++) {
+                  let e = 0;
+                  for (const p of px) e += Math.min(sq(p, COLOUR_PALETTE_RGB[a]), sq(p, COLOUR_PALETTE_RGB[b]));
+                  best = Math.min(best, e);
+                }
+              }
+              const cell = res.value.cells[cr][cc];
+              // The reported error is the error of the reported colours and blocks.
+              let own = 0;
+              for (let k = 0; k < 6; k++) own += sq(px[k], COLOUR_PALETTE_RGB[cell.blocks[k] ? cell.fg : cell.bg]);
+              expect(cell.error).toBeCloseTo(own, 6);
+              expect(cell.error).toBeLessThanOrEqual(best + 1e-6);
+              if (cell.fg === cell.bg) expect(cell.blocks.every((b) => b === 0)).toBe(true);
+              else expect(cell.fg).toBeLessThan(cell.bg);
+              total += cell.error;
+            }
+          }
+          expect(res.value.totalError).toBeCloseTo(total, 4);
+        },
+      ),
+      { numRuns: mosaicRuns(60, 300), seed: 901 },
+    );
+  });
+
+  it('V13 image to mosaic round trip: an image with at most two palette colours per cell is reproduced exactly, and its sources encode and decode to the same blocks and colours', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 40 }),
+        fc.integer({ min: 1, max: 24 }),
+        fc.integer({ min: 1, max: 40 }),
+        fc.integer({ min: 1, max: 24 }),
+        fc.array(fc.tuple(fc.integer({ min: 0, max: 7 }), fc.integer({ min: 0, max: 7 }), fc.integer({ min: 0, max: 63 })), { minLength: 40, maxLength: 40 }),
+        fc.boolean(),
+        (colsWanted, rowsWanted, col, row, cellPool, diffusion) => {
+          const cols = Math.min(colsWanted, 41 - col);
+          const rows = Math.min(rowsWanted, 25 - row);
+          const rgb: number[] = new Array(cols * 2 * rows * 3 * 3).fill(0);
+          const expected: { fg: number; bg: number; bits: number }[][] = [];
+          for (let cr = 0; cr < rows; cr++) {
+            const line: { fg: number; bg: number; bits: number }[] = [];
+            for (let cc = 0; cc < cols; cc++) {
+              const [a, b, bits] = cellPool[(cr * cols + cc) % cellPool.length];
+              line.push({ fg: a, bg: b, bits });
+              for (let k = 0; k < 6; k++) {
+                const colour = COLOUR_PALETTE_RGB[(bits >> k) & 1 ? a : b];
+                const x = cc * 2 + (k % 2);
+                const y = cr * 3 + Math.floor(k / 2);
+                const i = (y * cols * 2 + x) * 3;
+                rgb[i] = colour[0];
+                rgb[i + 1] = colour[1];
+                rgb[i + 2] = colour[2];
+              }
+            }
+            expected.push(line);
+          }
+          const res = imageToMosaic(blockImage(cols, rows, rgb), cols, rows, { row, col, diffusion });
+          expect(res.ok).toBe(true);
+          if (!res.ok) return;
+          // Exact palette content: zero error, so diffusion has nothing to spread either.
+          expect(res.value.totalError).toBe(0);
+          for (let cr = 0; cr < rows; cr++) {
+            for (let cc = 0; cc < cols; cc++) {
+              const c = res.value.cells[cr][cc];
+              const e = expected[cr][cc];
+              for (let k = 0; k < 6; k++) {
+                const want = (e.bits >> k) & 1 ? e.fg : e.bg;
+                expect(c.blocks[k] ? c.fg : c.bg).toBe(want);
+              }
+            }
+          }
+          const page: PageSource = { id: 'test/image', rows: [], mosaics: res.value.sources };
+          const built = buildPageScreen(page);
+          expect(built.ok).toBe(true);
+          if (!built.ok) return;
+          expect(built.value.warnings).toEqual([]);
+          const encoded = encodePage(page);
+          expect(encoded.ok).toBe(true);
+          if (!encoded.ok) return;
+          const decoded = decodeBytes(encoded.value.bytes);
+          expect(screensEqual(decoded, built.value.screen)).toBe(true);
+          for (let cr = 0; cr < rows; cr++) {
+            for (let cc = 0; cc < cols; cc++) {
+              const c = res.value.cells[cr][cc];
+              const cell = decoded.rows[row + cr][col - 1 + cc];
+              expect(cell.set).toBe('G1');
+              expect(cell.code).toBe(blocksToG1Code(c.blocks));
+              expect(cell.fg).toBe(c.fg);
+              expect(cell.bg).toBe(c.bg);
+            }
+          }
+        },
+      ),
+      { numRuns: mosaicRuns(40, 200), seed: 902 },
+    );
+  });
+
+  it('resampling: a uniform image gives uniform blocks at any size; an image at block size is unchanged; RGBA is read with alpha ignored', () => {
+    const uniform: RgbImage = { width: 37, height: 23, data: new Uint8Array(37 * 23 * 3).fill(0).map((_, i) => [200, 40, 90][i % 3]) };
+    const r = resampleToBlocks(uniform, 10, 9);
+    expect(r.ok).toBe(true);
+    if (r.ok) for (let i = 0; i < r.value.length; i++) expect(r.value[i]).toBeCloseTo([200, 40, 90][i % 3], 9);
+    const exact = blockImage(2, 1, Array.from({ length: 4 * 3 * 3 }, (_, i) => (i * 37) % 256));
+    const e = resampleToBlocks(exact, 4, 3);
+    expect(e.ok).toBe(true);
+    if (e.ok) expect(Array.from(e.value)).toEqual(Array.from(exact.data));
+    const rgba: RgbImage = { width: 2, height: 3, data: Uint8Array.from(Array.from({ length: 6 }, () => [10, 20, 30, 0]).flat()) };
+    const a = resampleToBlocks(rgba, 2, 3);
+    expect(a.ok).toBe(true);
+    if (a.ok) expect(Array.from(a.value)).toEqual(Array.from({ length: 6 }, () => [10, 20, 30]).flat());
+  });
+
+  it('diffusion: deterministic, only the error budget moves, and a mid-grey area mixes black and white blocks instead of one flat colour', () => {
+    const cols = 8;
+    const rows = 4;
+    const grey: RgbImage = { width: cols * 2, height: rows * 3, data: new Uint8Array(cols * 2 * rows * 3 * 3).fill(128), channels: 3 };
+    const mono = [COLOUR_PALETTE_RGB[0], COLOUR_PALETTE_RGB[7], COLOUR_PALETTE_RGB[0], COLOUR_PALETTE_RGB[7], COLOUR_PALETTE_RGB[0], COLOUR_PALETTE_RGB[7], COLOUR_PALETTE_RGB[0], COLOUR_PALETTE_RGB[7]];
+    const plain = imageToMosaic(grey, cols, rows, { palette: mono });
+    const d1 = imageToMosaic(grey, cols, rows, { palette: mono, diffusion: true });
+    const d2 = imageToMosaic(grey, cols, rows, { palette: mono, diffusion: true });
+    expect(plain.ok && d1.ok && d2.ok).toBe(true);
+    if (!plain.ok || !d1.ok || !d2.ok) return;
+    expect(d1.value).toEqual(d2.value);
+    const share = (m: typeof plain.value): number => {
+      let on = 0;
+      for (const line of m.cells) for (const c of line) for (const b of c.blocks) on += mono[b ? c.fg : c.bg][0] > 128 ? 1 : 0;
+      return on / (cols * rows * 6);
+    };
+    // Without diffusion every block of a flat grey picks the same nearer colour.
+    expect([0, 1]).toContain(share(plain.value));
+    // With diffusion about half of the blocks are white (128 / 245 of the way from black to white).
+    expect(share(d1.value)).toBeGreaterThan(0.35);
+    expect(share(d1.value)).toBeLessThan(0.65);
+  });
+
+  it('rejects bad sizes and positions with a bad-bitmap error', () => {
+    const img = blockImage(1, 1, new Array(18).fill(0));
+    for (const [cols, rows, o] of [
+      [0, 1, {}],
+      [41, 1, {}],
+      [1, 25, {}],
+      [2, 1, { col: 40 }],
+      [1, 2, { row: 24 }],
+      [1, 1, { col: 0 }],
+    ] as const) {
+      const r = imageToMosaic(img, cols, rows, o);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.kind).toBe('bad-bitmap');
+    }
+    expect(imageToMosaic({ width: 2, height: 3, data: new Uint8Array(5) }, 1, 1).ok).toBe(false);
   });
 });

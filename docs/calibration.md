@@ -275,3 +275,68 @@ new modem task, measured against both M6 and A4.
 
 For the demo, the noise slider of 3615 MATHS and the vote demonstration should stay at or above
 14 dB for a page that the vote repairs, and around 12 dB to show damage the vote only partly repairs.
+
+---
+
+## FANTOME levels: simulated acoustic margin (fantome task 5, pre-calibration)
+
+**Status: pre-calibration only.** Task 5 asks for acoustic tests with two devices; those are not
+done, and the task stays open. This section measures, in simulation, how much an acoustic path
+can change the outcome of each committed level, and recommends values for the two-device test.
+
+**Method.** `npx tsx prototypes/fantome-acoustic-margin.ts` and
+`npx tsx prototypes/fantome-ebn0-sweep.ts` (deterministic). Each WAV goes through an "acoustic
+path" and then through the generator's own check, `verifyLevelWav` (the app pipeline): feature on
+→ code row CER = 0 (plus ≥ 3 error cells for L2, ≥ 4 grouped receptions for L4), feature off →
+code row CER ≥ 50 % (L3, L4). Acoustic path: extra AWGN at γ_3k relative to the tone of the WAV
+(tone amplitude estimated from the first 50 ms, which includes the WAV's own noise: the extra
+noise is at most 0.7 dB stronger than stated), optionally a clock mismatch (`clockPpm`) or one or
+two room reflections. 3 seeds per condition (margin script), 5 generation seeds × 5 perturbations
+(sweep).
+
+**Committed levels (`levels.json` as of this commit).**
+
+| Level | Extra noise 40 dB | 30 dB | 25 dB | 20 dB | 15 dB | clock ±1000 ppm (+30 dB) | echo −10 dB @7 ms, −16 dB @19 ms (+30 dB) | echo −6 dB @5 ms (+30 dB) |
+|---|---|---|---|---|---|---|---|---|
+| L1 clean | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3, 3/3 | 3/3 | 3/3 |
+| L2 noise 12.5 dB | 3/3 | 2/3 | 2/3 | 1/3 | 0/3 | 3/3, 0/3 | 0/3 | 0/3 |
+| L3 offset +380 Hz, 18 dB | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 3/3, 3/3 | 3/3 | 0/3 |
+| L4 whisper 11.5 dB, 7 repeats | 3/3 | 1/3 | 0/3 | 0/3 | 0/3 | 1/3, 2/3 | 0/3 | 0/3 |
+
+(Solved seeds with the feature on. L3 and L4 stayed at 100 % code-row CER with the feature off
+whenever measured.)
+
+**Reading.** Extra noise at 30 dB lowers the Eb/N0 of L2 and L4 by about 0.02 dB, yet it breaks
+them on 1 or 2 seeds out of 3. The cause is not the level of the noise but its realisation: the
+generator tries seeds until the checks pass for **that** noise, and L2 and L4 sit at the edge, so
+any new noise (every acoustic playback) redraws the outcome. L1 and L3 have a wide margin; only a
+strong early reflection (−6 dB at 5 ms) breaks L3.
+
+**Sweep of L2 and L4 (5 generation seeds; the accepted WAVs each replayed through extra noise
+30 dB × 3, clock −1000 ppm and an echo −16 dB at 7 ms).**
+
+| Level | Eb/N0 | WAVs the generator accepts | Solved after perturbation | Error cells on the page | Feature off, code-row CER (min) |
+|---|---|---|---|---|---|
+| L2 | 12.5 dB (current) | 3/5 | 8/15 | 15-22 | – |
+| L2 | **13.5 dB** | 4/5 | 17/20 (18/20 with the code row intact; one failure is "2 error cells") | 3-10 | – |
+| L2 | 14.5 dB | 2/5 | 9/10 | 4-5 | – |
+| L2 | 15.5 dB, 16.5 dB | 0/5 | – (too few error cells) | 0-2 | – |
+| L4 | 11.5 dB (current) | 1/5 | 1/5 | – | 100 % |
+| L4 | 12.5 dB | 2/5 | 6/10 | – | 90 % |
+| L4 | 13.5 dB | 1/5 | 5/5 | – | 0 % (fails requirement 4.4) |
+| L4 | 14.5 dB | 0/5 | – | – | 0 % |
+
+**Recommendations (not applied; to confirm with the two-device test).**
+- **L2: 13.5 dB.** The code row survives the perturbations in 90 % of the trials instead of 53 %,
+  and the page still shows 3 to 10 hatched cells. Above 14.5 dB the parity errors become too rare
+  to be seen.
+- **L4: no Eb/N0 works with uniform noise.** The window between "a single pass fails" (≤ 12.5 dB)
+  and "the vote succeeds robustly" (≥ 13.5 dB) is closed: at 13.5 dB a single pass already reads
+  the code. A design change is needed (fantome design, with Role A), for example noise bursts
+  (`bursts` of the line simulator) instead of AWGN, so that each pass is damaged at different
+  places and the vote has erasures to repair, or more repetitions. To be measured with the same
+  sweep before the change.
+- **Two-device test protocol.** Phone (speaker) 20 to 30 cm from the laptop (microphone), quiet
+  room, volume at about two thirds, Écoute mode. For each level: 5 plays, record whether the code
+  can be read with the feature on and not with it off, and the SNR shown in the HUD. Record the
+  results here, next to this table.

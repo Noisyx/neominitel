@@ -45,6 +45,7 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
 - [ ] 8. Double height and width `[STRETCH]`
   - Implement after verifying the direction of double height on a real Minitel reference.
 
-- [ ] 9. Image to mosaic `[STRETCH]` (mathematician)
+- [x] 9. Image to mosaic `[STRETCH]` (mathematician)
   - Per-cell best colour pair, optional error diffusion; used by 3615 LIBRE.
+  - Done: `src/videotex/image-mosaic.ts` (exported by the barrel), properties V12 and V13, `docs/math.md` section 9. The image import UI belongs to 3615 LIBRE (app task 16, Role A).
   - _Requirements: 6.3_
