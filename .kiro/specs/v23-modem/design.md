@@ -303,5 +303,5 @@ These notes are for the mathematician to check and extend.
 
 ## Testing
 - Property tests M1-M13 in `tests/properties/v23-modem.test.ts` with seeded RNG.
-- Two modes with identical test names: fast (default) and slow (`NEOMINITEL_SLOW=1`: more cases, enables the Monte Carlo properties M6 and M10).
+- Two modes with identical test names: fast (default) and slow (`NEOMINITEL_SLOW=1`: more cases). No property is skipped in fast mode. The Monte Carlo property M6 keeps its Eb/N0, bit count and 10⁻³ limit in both modes; fast mode checks seeds 1-3 (about 3 s), slow mode the 20 seeds of the property (about 22 s). M10 uses fewer rates and targets in fast mode.
 - Calibration script `scripts/calibrate-modem.ts`: BER vs Eb/N0 for both threshold modes, SNR estimator bias, written to `docs/calibration.md`.

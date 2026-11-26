@@ -3593,22 +3593,24 @@ describe('v23-modem task 10: quality events', () => {
  */
 const M6_EBN0_DB = 16.5;
 
-describe('v23-modem task 10: BER under noise (slow mode)', () => {
-  // design.md "Testing": the Monte Carlo property M6 runs in slow mode only.
-  it.runIf(isSlowTestsEnabled())(`M6 noise: at Eb/N0 >= ${M6_EBN0_DB} dB (calibrated), BER on 20 000 PN9 bits is <= 1e-3 for 20 seeds`, () => {
+describe('v23-modem task 10: BER under noise', () => {
+  // design.md "Testing": M6 runs in both modes with the same Eb/N0, bit count and 1e-3 limit.
+  // Slow mode checks the 20 seeds of the property (about 22 s); fast mode checks seeds 1..3.
+  const m6Seeds = isSlowTestsEnabled() ? 20 : 3;
+  it(`M6 noise: at Eb/N0 >= ${M6_EBN0_DB} dB (calibrated), BER on 20 000 PN9 bits is <= 1e-3 for 20 seeds`, () => {
     const fs = 16000;
     const ebN0Db = M6_EBN0_DB;
     const bers: string[] = [];
     let failing = 0;
     const results: { seed: number; bits: number; ber: number }[] = [];
-    for (let seed = 1; seed <= 20; seed++) {
+    for (let seed = 1; seed <= m6Seeds; seed++) {
       // framesForBits: lost frames are not compared, so at least 20 000 bits remain.
       const s = chainBer({ sampleRate: fs, ebN0Db, seed, frames: framesForBits(20000) });
       results.push({ seed, bits: s.bits, ber: s.ber });
       bers.push(s.ber.toExponential(2));
       if (s.ber > 1e-3 || s.bits < 20000) failing++;
     }
-    console.log(`M6 at Eb/N0 = ${ebN0Db} dB, BER per seed: ${bers.join(' ')}; ${failing} of 20 seeds fail`);
+    console.log(`M6 at Eb/N0 = ${ebN0Db} dB, BER per seed: ${bers.join(' ')}; ${failing} of ${m6Seeds} seeds fail`);
     for (const r of results) {
       expect(r.ber, `seed ${r.seed}`).toBeLessThanOrEqual(1e-3);
       expect(r.bits, `seed ${r.seed}`).toBeGreaterThanOrEqual(20000);
