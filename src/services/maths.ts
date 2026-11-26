@@ -1,11 +1,20 @@
 import { COLOURS, encodePage, type PageSource } from '../videotex';
-import type { Service, ServiceInput, ServiceOutput } from './types';
+import type { InputFieldSpec, Service, ServiceInput, ServiceOutput } from './types';
+
+/** Number of 7-bit PN9 frames streamed after the Banc d'essai page (~60 s at 120 car/s). */
+export const MATHS_BENCH_PN9_FRAMES = 7200;
+
+export const MATHS_MENU_INPUT: InputFieldSpec = {
+  row: 22,
+  col: 18,
+  maxLength: 8,
+};
 
 /**
  * Provisional 3615 MATHS pages inside `src/services/maths.ts` (Role A folder) while
  * `content/pages/maths.ts` remains reserved for Role B (the mathematician, J9).
  */
-const MATHS_PROVISIONAL_PAGES: readonly PageSource[] = [
+export const MATHS_PROVISIONAL_PAGES: readonly PageSource[] = [
   {
     id: 'maths/accueil',
     status: '3615 MATHS                SIGNAL & MODEM',
@@ -14,72 +23,86 @@ const MATHS_PROVISIONAL_PAGES: readonly PageSource[] = [
         row: 1,
         col: 1,
         segments: [
-          { text: ' 3615 MATHS - LABORATOIRE DU MODEM V.23 ', fg: COLOURS.BLACK, bg: COLOURS.CYAN },
+          {
+            text: ' 3615 MATHS - LABORATOIRE DU MODEM V.23 ',
+            fg: COLOURS.BLACK,
+            bg: COLOURS.CYAN,
+          },
         ],
       },
       {
         row: 4,
         col: 2,
         segments: [
-          { text: 'Comment faire voyager du texte dans un', fg: COLOURS.WHITE },
+          {
+            text: 'Explorez la théorie et mesurez en live',
+            fg: COLOURS.WHITE,
+          },
         ],
       },
       {
         row: 5,
         col: 2,
         segments: [
-          { text: 'simple sifflement téléphonique ?', fg: COLOURS.WHITE },
+          { text: 'le récepteur FSK dans le Math HUD :', fg: COLOURS.WHITE },
         ],
       },
       {
         row: 8,
         col: 3,
         segments: [
-          { text: '1. Modulation FSK continue en phase', fg: COLOURS.CYAN },
+          { text: ' 1 ', fg: COLOURS.BLACK, bg: COLOURS.CYAN },
+          { text: ' Modulation FSK et indice h = 2/3', fg: COLOURS.CYAN, bg: COLOURS.BLACK },
         ],
       },
       {
-        row: 10,
+        row: 11,
         col: 3,
         segments: [
-          { text: '2. Trame asynchrone 7E1 et parité', fg: COLOURS.YELLOW },
-        ],
-      },
-      {
-        row: 12,
-        col: 3,
-        segments: [
-          { text: '3. Discriminateur complexe et filtre', fg: COLOURS.GREEN },
+          { text: ' 2 ', fg: COLOURS.BLACK, bg: COLOURS.YELLOW },
+          { text: ' BANC : trames PN9 & courbes BER', fg: COLOURS.YELLOW, bg: COLOURS.BLACK },
         ],
       },
       {
         row: 14,
         col: 3,
         segments: [
-          { text: '4. Seuil adaptatif et courbes Eb/N0', fg: COLOURS.MAGENTA },
+          { text: ' 3 ', fg: COLOURS.BLACK, bg: COLOURS.GREEN },
+          { text: ' VOTE : erreur sur 1/3/5/7 reçus', fg: COLOURS.GREEN, bg: COLOURS.BLACK },
         ],
       },
       {
-        row: 19,
+        row: 18,
         col: 2,
         segments: [
           { text: ' SUITE ', fg: COLOURS.BLACK, bg: COLOURS.CYAN },
-          { text: ' page FSK   ', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
+          { text: ' parcourir ', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
           { text: ' GUIDE ', fg: COLOURS.BLACK, bg: COLOURS.CYAN },
-          { text: ' navigation', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
+          { text: ' aide', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
+        ],
+      },
+      {
+        row: 22,
+        col: 2,
+        segments: [
+          { text: 'Choix ou code : ........', fg: COLOURS.YELLOW },
         ],
       },
     ],
   },
   {
     id: 'maths/fsk',
-    status: '3615 MATHS - FSK V.23          PAGE 2/2',
+    status: '3615 MATHS - FSK V.23          PAGE 2/4',
     rows: [
       {
         row: 1,
         col: 1,
         segments: [
-          { text: ' DEUX FREQUENCES POUR CODER LES BITS    ', fg: COLOURS.BLACK, bg: COLOURS.YELLOW },
+          {
+            text: ' DEUX FREQUENCES POUR CODER LES BITS    ',
+            fg: COLOURS.BLACK,
+            bg: COLOURS.YELLOW,
+          },
         ],
       },
       {
@@ -100,14 +123,22 @@ const MATHS_PROVISIONAL_PAGES: readonly PageSource[] = [
         row: 8,
         col: 4,
         segments: [
-          { text: ' Bit 1 (mark)  -> tonalité grave ', fg: COLOURS.BLACK, bg: COLOURS.GREEN },
+          {
+            text: ' Bit 1 (mark)  -> tonalité grave ',
+            fg: COLOURS.BLACK,
+            bg: COLOURS.GREEN,
+          },
         ],
       },
       {
         row: 10,
         col: 4,
         segments: [
-          { text: ' Bit 0 (space) -> tonalité aiguë ', fg: COLOURS.WHITE, bg: COLOURS.BLUE },
+          {
+            text: ' Bit 0 (space) -> tonalité aiguë ',
+            fg: COLOURS.WHITE,
+            bg: COLOURS.BLUE,
+          },
         ],
       },
       {
@@ -121,24 +152,207 @@ const MATHS_PROVISIONAL_PAGES: readonly PageSource[] = [
         row: 14,
         col: 2,
         segments: [
-          { text: 'soit h = 2/3 (signaux corrélés).', fg: COLOURS.CYAN },
+          { text: 'Corrélation |rho| = 0,4135 entre tons.', fg: COLOURS.CYAN },
         ],
       },
       {
         row: 19,
         col: 2,
         segments: [
-          { text: ' RETOUR ', fg: COLOURS.BLACK, bg: COLOURS.YELLOW },
-          { text: ' ou ', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
+          { text: ' SUITE ', fg: COLOURS.BLACK, bg: COLOURS.YELLOW },
+          { text: ' Banc BER  ', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
           { text: ' SOMMAIRE ', fg: COLOURS.BLACK, bg: COLOURS.YELLOW },
-          { text: ' accueil MATHS', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
+          { text: ' menu', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'maths/banc',
+    status: '3615 MATHS - BANC D ESSAI      PAGE 3/4',
+    rows: [
+      {
+        row: 1,
+        col: 1,
+        segments: [
+          {
+            text: ' BANC D ESSAI : SEQUENCE PN9 & BER      ',
+            fg: COLOURS.BLACK,
+            bg: COLOURS.GREEN,
+          },
+        ],
+      },
+      {
+        row: 4,
+        col: 2,
+        segments: [
+          {
+            text: 'Envoi continu de trames PN9 (x9+x5+1)',
+            fg: COLOURS.WHITE,
+          },
+        ],
+      },
+      {
+        row: 5,
+        col: 2,
+        segments: [
+          {
+            text: 'juste après affichage de cette page.',
+            fg: COLOURS.WHITE,
+          },
+        ],
+      },
+      {
+        row: 8,
+        col: 2,
+        segments: [
+          { text: 'Dans le panneau Math HUD à droite :', fg: COLOURS.YELLOW },
+        ],
+      },
+      {
+        row: 10,
+        col: 3,
+        segments: [
+          { text: '- Courbe 1 : FSK orthogonal idéal', fg: COLOURS.GREEN },
+        ],
+      },
+      {
+        row: 12,
+        col: 3,
+        segments: [
+          { text: '- Courbe 2 : FSK corrélé (Marcum Q1)', fg: COLOURS.CYAN },
+        ],
+      },
+      {
+        row: 14,
+        col: 3,
+        segments: [
+          { text: '- Courbe 3 : discriminateur simulé', fg: COLOURS.YELLOW },
+        ],
+      },
+      {
+        row: 17,
+        col: 2,
+        segments: [
+          {
+            text: 'Variez Eb/N0 : un nouveau point BER',
+            fg: COLOURS.WHITE,
+          },
+        ],
+      },
+      {
+        row: 18,
+        col: 2,
+        segments: [
+          {
+            text: 'avec intervalle 95% arrive en < 2 s.',
+            fg: COLOURS.WHITE,
+          },
+        ],
+      },
+      {
+        row: 21,
+        col: 2,
+        segments: [
+          { text: ' REPETITION ', fg: COLOURS.BLACK, bg: COLOURS.GREEN },
+          { text: ' relancer ', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
+          { text: ' SUITE ', fg: COLOURS.BLACK, bg: COLOURS.GREEN },
+          { text: ' Vote', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'maths/vote',
+    status: '3615 MATHS - VOTE MAJORITAIRE  PAGE 4/4',
+    rows: [
+      {
+        row: 1,
+        col: 1,
+        segments: [
+          {
+            text: ' REPARATION PAR VOTE : 1, 3, 5, 7 RECUS ',
+            fg: COLOURS.WHITE,
+            bg: COLOURS.MAGENTA,
+          },
+        ],
+      },
+      {
+        row: 4,
+        col: 2,
+        segments: [
+          {
+            text: '1 bit de parité détecte toute erreur',
+            fg: COLOURS.WHITE,
+          },
+        ],
+      },
+      {
+        row: 5,
+        col: 2,
+        segments: [
+          {
+            text: 'simple (effacement p), pas double :',
+            fg: COLOURS.WHITE,
+          },
+        ],
+      },
+      {
+        row: 7,
+        col: 3,
+        segments: [
+          { text: 'P(non détectée) ~ 28 * eps^2 (q)', fg: COLOURS.CYAN },
+        ],
+      },
+      {
+        row: 10,
+        col: 3,
+        segments: [
+          { text: 'Effacements seuls : P_echec = p^N', fg: COLOURS.GREEN },
+        ],
+      },
+      {
+        row: 12,
+        col: 3,
+        segments: [
+          { text: 'Majorité brute : Somme C(N,k) q^k', fg: COLOURS.YELLOW },
+        ],
+      },
+      {
+        row: 16,
+        col: 2,
+        segments: [
+          {
+            text: 'Réglez Eb/N0 vers 12-14 dB et lancez',
+            fg: COLOURS.WHITE,
+          },
+        ],
+      },
+      {
+        row: 17,
+        col: 2,
+        segments: [
+          {
+            text: '7 réceptions face aux formules HUD.',
+            fg: COLOURS.WHITE,
+          },
+        ],
+      },
+      {
+        row: 21,
+        col: 2,
+        segments: [
+          { text: ' REPETITION ', fg: COLOURS.WHITE, bg: COLOURS.MAGENTA },
+          { text: ' +1 reçu ', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
+          { text: ' SOMMAIRE ', fg: COLOURS.WHITE, bg: COLOURS.MAGENTA },
+          { text: ' menu', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
         ],
       },
     ],
   },
 ];
 
-const MATHS_GUIDE_PAGE: PageSource = {
+export const MATHS_GUIDE_PAGE: PageSource = {
   id: 'maths/guide',
   status: '3615 MATHS - GUIDE             AIDE LABO',
   rows: [
@@ -146,28 +360,46 @@ const MATHS_GUIDE_PAGE: PageSource = {
       row: 1,
       col: 1,
       segments: [
-        { text: ' AIDE DU SERVICE 3615 MATHS             ', fg: COLOURS.WHITE, bg: COLOURS.BLUE },
+        {
+          text: ' AIDE DU SERVICE 3615 MATHS             ',
+          fg: COLOURS.WHITE,
+          bg: COLOURS.BLUE,
+        },
       ],
     },
     {
       row: 4,
       col: 2,
       segments: [
-        { text: 'Parcourez les chapitres avec SUITE et', fg: COLOURS.WHITE },
-      ],
-    },
-    {
-      row: 5,
-      col: 2,
-      segments: [
-        { text: 'RETOUR. Le banc d essai BER en direct', fg: COLOURS.WHITE },
+        { text: '- Tapez 1, 2 (BANC), 3 (VOTE) + ENVOI', fg: COLOURS.WHITE },
       ],
     },
     {
       row: 6,
       col: 2,
       segments: [
-        { text: 'et la page Vote arrivent au jalon J8.', fg: COLOURS.YELLOW },
+        { text: '- Sur BANC : bougez le curseur Eb/N0', fg: COLOURS.CYAN },
+      ],
+    },
+    {
+      row: 7,
+      col: 2,
+      segments: [
+        { text: '  pour tracer les points sur le HUD.', fg: COLOURS.CYAN },
+      ],
+    },
+    {
+      row: 9,
+      col: 2,
+      segments: [
+        { text: '- Sur VOTE : cumulez 1, 3, 5, 7 reçus', fg: COLOURS.YELLOW },
+      ],
+    },
+    {
+      row: 10,
+      col: 2,
+      segments: [
+        { text: '  face aux formules p^N et majorité.', fg: COLOURS.YELLOW },
       ],
     },
     {
@@ -175,7 +407,7 @@ const MATHS_GUIDE_PAGE: PageSource = {
       col: 2,
       segments: [
         { text: ' SOMMAIRE ', fg: COLOURS.BLACK, bg: COLOURS.CYAN },
-        { text: ' retour au menu 3615 MATHS', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
+        { text: ' retour au menu MATHS', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
       ],
     },
   ],
@@ -188,10 +420,25 @@ export interface MathsState {
 
 function toOutput(page: PageSource): ServiceOutput {
   const res = encodePage(page);
-  return {
+  const base: ServiceOutput = {
     pageId: page.id,
     bytes: res.ok ? res.value.bytes : new Uint8Array([0x0c]),
   };
+  if (page.id === 'maths/accueil') {
+    return { ...base, input: MATHS_MENU_INPUT };
+  }
+  if (page.id === 'maths/banc') {
+    return { ...base, testPattern: { frames: MATHS_BENCH_PN9_FRAMES } };
+  }
+  return base;
+}
+
+function resolveMenuChoice(raw: string): number | null {
+  const cleaned = raw.trim().toUpperCase();
+  if (cleaned === '1' || cleaned === 'FSK') return 1;
+  if (cleaned === '2' || cleaned === 'BANC' || cleaned === 'BER') return 2;
+  if (cleaned === '3' || cleaned === 'VOTE') return 3;
+  return null;
 }
 
 export const mathsService: Service<MathsState> = {
@@ -208,6 +455,19 @@ export const mathsService: Service<MathsState> = {
 
       case 'Guide':
         return [{ index: state.index, inGuide: true }, toOutput(MATHS_GUIDE_PAGE)];
+
+      case 'Envoi': {
+        if (!state.inGuide && state.index === 0) {
+          const targetIdx = resolveMenuChoice(input.text);
+          if (targetIdx !== null) {
+            return [
+              { index: targetIdx, inGuide: false },
+              toOutput(MATHS_PROVISIONAL_PAGES[targetIdx]),
+            ];
+          }
+        }
+        return [state, null];
+      }
 
       case 'Suite': {
         const nextIndex = state.inGuide

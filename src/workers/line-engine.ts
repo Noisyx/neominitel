@@ -1,5 +1,10 @@
 import { C0, createVideotexDecoder, type Cell, type VideotexDecoder } from '../videotex';
-import type { DemodEvent, StreamingDemodulator } from '../modem';
+import {
+  BerCounter,
+  pn9Frames,
+  type DemodEvent,
+  type StreamingDemodulator,
+} from '../modem';
 import { SpectrumAnalyzer512 } from './fft512';
 import {
   resolveModemProvider,
@@ -14,8 +19,10 @@ import {
 } from './protocol';
 
 export const BLOCK_DURATION_SEC = 0.1; // 100 ms blocks (design.md)
-export const MAX_BLOCKS_AHEAD = 3; // at most 3 blocks ahead of playback (design.md)
+export const MAX_BLOCKS_AHEAD = 2; // <= 200 ms lookahead so setSim takes effect within 200 ms (Req 3.2)
 export const PAGE_IDLE_END_SEC = 0.3; // 300 ms of idle carrier after a page triggers pageEnd
+export const BER_REPORT_INTERVAL_SEC = 0.25; // emit live BER snapshots 4x/s during PN9 bench
+export const CLEAN_BENCH_EBN0_DB = 18; // x-axis ceiling when simulator noise is disabled ("clean")
 
 interface ActiveTransmission {
   id: number;
@@ -28,6 +35,10 @@ interface ActiveTransmission {
   pageBytes: Uint8Array;
   pageAudio: Float32Array | null;
   pageOffset: number;
+  testPatternFrames: number;
+  inPn9Phase: boolean;
+  pn9Audio: Float32Array | null;
+  pn9Offset: number;
 }
 
 export interface LineEngineOptions {
@@ -42,6 +53,7 @@ export interface LineEngine {
     pageId: string;
     simulate: boolean;
     withConnectionSequence?: boolean;
+    testPattern?: { frames: number };
   }): FromWorker | null;
   /** Produces the next 100 ms `{ t: 'block', ... }` message, or `null` if no transmission is active. */
   nextTransmitBlock(): Extract<FromWorker, { t: 'block' }> | null;
@@ -93,12 +105,26 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
   let simulator: StreamingSimulator | null = null;
   const vtxDecoder: VideotexDecoder = createVideotexDecoder();
   const spectrum = new SpectrumAnalyzer512();
+  const berCounter = new BerCounter();
 
   let streamSampleCursor = 0;
   let demodSampleOrigin = 0;
   let pageActive = false;
   let lastCharGlobalSample = 0;
+  let berSettleUntilSample = 0;
+  let lastBerEmitSample = 0;
+  let latestMeasuredEbN0Db: number | null = null;
   let activeTx: ActiveTransmission | null = null;
+
+  function resolveBenchEbN0Db(simulate: boolean): number {
+    if (simulate && simParams.ebN0Db !== null) {
+      return simParams.ebN0Db;
+    }
+    if (latestMeasuredEbN0Db !== null && Number.isFinite(latestMeasuredEbN0Db)) {
+      return Math.max(0, Math.min(CLEAN_BENCH_EBN0_DB, latestMeasuredEbN0Db));
+    }
+    return CLEAN_BENCH_EBN0_DB;
+  }
 
   function createFreshDemodulator(): FromWorker | null {
     // Until modem task 8 lands, only threshold: 'fixed' is accepted on initialization (design.md)
@@ -156,6 +182,9 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
           break;
         }
         case 'quality': {
+          if (Number.isFinite(ev.ebN0Db)) {
+            latestMeasuredEbN0Db = ev.ebN0Db;
+          }
           out.push({
             atSample: globalSample,
             e: 'quality',
@@ -164,16 +193,26 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
           break;
         }
         case 'diag': {
+          // Keep d.atSample and d.bitWindows on the same demodulator-local sample clock
           out.push({
             atSample: globalSample,
             e: 'diag',
-            d: { ...ev, atSample: globalSample },
+            d: ev,
             spectrumDb: spectrum.computeSpectrumDb(),
+            sampleRate,
           });
           break;
         }
         case 'char': {
           const hasError = !ev.parityOk || !ev.framingOk;
+          out.push({
+            atSample: globalSample,
+            e: 'rxStats',
+            chars: 1,
+            parityErrors: ev.parityOk ? 0 : 1,
+            framingErrors: ev.framingOk ? 0 : 1,
+            sampleRate,
+          });
           const { changed } = vtxDecoder.push({
             value: ev.value,
             error: hasError,
@@ -221,6 +260,58 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
     return out;
   }
 
+  function convertPn9DemodEvents(rawEvents: readonly DemodEvent[]): TimedEvent[] {
+    const sorted = stableSortDemodEvents(rawEvents);
+    const out: TimedEvent[] = [];
+
+    for (const ev of sorted) {
+      const globalSample = Math.max(0, demodSampleOrigin + ev.atSample);
+
+      switch (ev.type) {
+        case 'carrier':
+          out.push({ atSample: globalSample, e: 'carrier', on: ev.on });
+          break;
+        case 'connect':
+          out.push({ atSample: globalSample, e: 'connect' });
+          break;
+        case 'quality':
+          if (Number.isFinite(ev.ebN0Db)) {
+            latestMeasuredEbN0Db = ev.ebN0Db;
+          }
+          out.push({
+            atSample: globalSample,
+            e: 'quality',
+            q: { ...ev, atSample: globalSample },
+          });
+          break;
+        case 'diag':
+          out.push({
+            atSample: globalSample,
+            e: 'diag',
+            d: ev,
+            spectrumDb: spectrum.computeSpectrumDb(),
+            sampleRate,
+          });
+          break;
+        case 'char':
+          out.push({
+            atSample: globalSample,
+            e: 'rxStats',
+            chars: 1,
+            parityErrors: ev.parityOk ? 0 : 1,
+            framingErrors: ev.framingOk ? 0 : 1,
+            sampleRate,
+          });
+          if (globalSample >= berSettleUntilSample) {
+            berCounter.pushFrame(ev.value, ev.framingOk);
+          }
+          break;
+      }
+    }
+
+    return out;
+  }
+
   return {
     init(nextSampleRate: number): FromWorker | null {
       sampleRate = nextSampleRate;
@@ -228,9 +319,13 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       demodSampleOrigin = 0;
       pageActive = false;
       lastCharGlobalSample = 0;
+      berSettleUntilSample = 0;
+      lastBerEmitSample = 0;
+      latestMeasuredEbN0Db = null;
       activeTx = null;
       vtxDecoder.reset();
       spectrum.reset();
+      berCounter.reset();
       simulator = modem.createSimulator(sampleRate, simParams);
       return createFreshDemodulator();
     },
@@ -241,6 +336,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       pageId,
       simulate,
       withConnectionSequence = false,
+      testPattern,
     }): FromWorker | null {
       // Ensure demodulator & simulator exist even if init was not called explicitly
       if (!simulator) {
@@ -265,6 +361,11 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
         }
       }
 
+      const requestedPn9Frames =
+        testPattern && Number.isSafeInteger(testPattern.frames) && testPattern.frames > 0
+          ? testPattern.frames
+          : 0;
+
       activeTx = {
         id,
         pageId,
@@ -276,6 +377,10 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
         pageBytes: bytes,
         pageAudio: null, // modulated right after connection sequence finishes so fakeModulate stays fresh
         pageOffset: 0,
+        testPatternFrames: requestedPn9Frames,
+        inPn9Phase: false,
+        pn9Audio: null,
+        pn9Offset: 0,
       };
 
       if (connectionAudio && demod) {
@@ -354,6 +459,94 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
         };
       }
 
+      // Phase 3: PN9 test bench frames streamed after the Videotex page completes (Task 11.2)
+      if (activeTx.inPn9Phase) {
+        if (activeTx.pn9Audio === null) {
+          const pn9Bytes = pn9Frames(activeTx.testPatternFrames);
+          const pn9Mod = modem.modulate(pn9Bytes, {
+            sampleRate,
+            channel: 'forward',
+            tailIdleMs: 40,
+          });
+          if (!pn9Mod.ok) {
+            activeTx = null;
+            return null;
+          }
+          activeTx.pn9Audio = pn9Mod.value;
+          activeTx.pn9Offset = 0;
+
+          berCounter.reset();
+          demod.reset();
+          demod.setThresholdMode(thresholdMode);
+          demodSampleOrigin = streamSampleCursor;
+          berSettleUntilSample = streamSampleCursor;
+          lastBerEmitSample = streamSampleCursor;
+        }
+
+        if (activeTx.pn9Offset >= activeTx.pn9Audio.length) {
+          activeTx = null;
+          return null;
+        }
+
+        const remainingPn9 = activeTx.pn9Audio.length - activeTx.pn9Offset;
+        const takePn9 = Math.min(blockSamples, remainingPn9);
+        const cleanPn9Slice = activeTx.pn9Audio.subarray(
+          activeTx.pn9Offset,
+          activeTx.pn9Offset + takePn9,
+        );
+        activeTx.pn9Offset += takePn9;
+        const isLastPn9Block = activeTx.pn9Offset >= activeTx.pn9Audio.length;
+
+        const processedPn9 = activeTx.simulate
+          ? simulator.process(cleanPn9Slice)
+          : cleanPn9Slice.slice();
+        const blockStart = streamSampleCursor;
+        streamSampleCursor += processedPn9.length;
+
+        spectrum.pushSamples(processedPn9);
+        const rawPn9Events = demod.push(processedPn9);
+        if (isLastPn9Block) {
+          for (const f of demod.flush()) {
+            rawPn9Events.push(f);
+          }
+        }
+
+        const eventsPn9 = convertPn9DemodEvents(rawPn9Events);
+        const reportSamples = Math.round(BER_REPORT_INTERVAL_SEC * sampleRate);
+        if (
+          streamSampleCursor - lastBerEmitSample >= reportSamples ||
+          isLastPn9Block
+        ) {
+          const snap = berCounter.snapshot();
+          if (snap.bits >= 50) {
+            eventsPn9.push({
+              atSample: streamSampleCursor,
+              e: 'ber',
+              ebN0Db: resolveBenchEbN0Db(activeTx.simulate),
+              bits: snap.bits,
+              errors: snap.errors,
+              lo: snap.lo,
+              hi: snap.hi,
+            });
+            lastBerEmitSample = streamSampleCursor;
+          }
+        }
+
+        const txIdPn9 = activeTx.id;
+        if (isLastPn9Block) {
+          activeTx = null;
+        }
+
+        return {
+          t: 'block',
+          id: txIdPn9,
+          audio: normalizeAudioForPlayback(processedPn9),
+          startSample: blockStart,
+          events: eventsPn9,
+          done: isLastPn9Block,
+        };
+      }
+
       // Phase 2: modulate page once (with 300 ms tail idle carrier so pageEnd triggers cleanly)
       if (activeTx.pageAudio === null) {
         const modRes = modem.modulate(activeTx.pageBytes, {
@@ -386,7 +579,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
         activeTx.pageOffset + take,
       );
       activeTx.pageOffset += take;
-      const isLastBlock = activeTx.pageOffset >= activeTx.pageAudio.length;
+      const isLastPageBlock = activeTx.pageOffset >= activeTx.pageAudio.length;
 
       const processed = activeTx.simulate
         ? simulator.process(cleanSlice)
@@ -396,7 +589,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
 
       spectrum.pushSamples(processed);
       const rawEvents = demod.push(processed);
-      if (isLastBlock) {
+      if (isLastPageBlock) {
         const flushed = demod.flush();
         for (const f of flushed) {
           rawEvents.push(f);
@@ -404,7 +597,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       }
 
       const events = convertDemodEvents(rawEvents, streamSampleCursor);
-      if (isLastBlock && pageActive) {
+      if (isLastPageBlock && pageActive) {
         events.push({
           atSample: streamSampleCursor,
           e: 'pageEnd',
@@ -414,8 +607,13 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       }
 
       const txId = activeTx.id;
-      if (isLastBlock) {
-        activeTx = null;
+      const hasPn9Next = activeTx.testPatternFrames > 0;
+      if (isLastPageBlock) {
+        if (hasPn9Next) {
+          activeTx.inPn9Phase = true;
+        } else {
+          activeTx = null;
+        }
       }
 
       return {
@@ -424,7 +622,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
         audio: normalizeAudioForPlayback(processed),
         startSample: blockStartSample,
         events,
-        done: isLastBlock,
+        done: isLastPageBlock && !hasPn9Next,
       };
     },
 
@@ -442,8 +640,25 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
     },
 
     setSim(nextSim: SimParams): void {
+      const ebN0Changed = nextSim.ebN0Db !== simParams.ebN0Db;
+      const impairmentChanged =
+        ebN0Changed ||
+        nextSim.offsetHz !== simParams.offsetHz ||
+        nextSim.clockPct !== simParams.clockPct ||
+        nextSim.hum !== simParams.hum ||
+        nextSim.bursts !== simParams.bursts ||
+        nextSim.seed !== simParams.seed;
+
       simParams = { ...nextSim };
       simulator?.setSim(simParams);
+
+      // Requirement 6.3: when Eb/N0 or channel impairments change during the PN9 bench,
+      // restart the BER counter after a 30 ms filter-settle window so a fresh point is measured.
+      if (impairmentChanged && activeTx?.inPn9Phase) {
+        berCounter.reset();
+        berSettleUntilSample = streamSampleCursor + Math.round(0.03 * sampleRate);
+        lastBerEmitSample = streamSampleCursor;
+      }
     },
 
     setThreshold(mode: 'fixed' | 'adaptive'): void {
@@ -474,8 +689,12 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       demodSampleOrigin = 0;
       pageActive = false;
       lastCharGlobalSample = 0;
+      berSettleUntilSample = 0;
+      lastBerEmitSample = 0;
+      latestMeasuredEbN0Db = null;
       vtxDecoder.reset();
       spectrum.reset();
+      berCounter.reset();
       demod?.reset();
       simulator?.reset();
     },

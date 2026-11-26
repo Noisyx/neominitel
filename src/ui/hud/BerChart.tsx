@@ -1,0 +1,299 @@
+import type { ReactElement } from 'react';
+import {
+  berNoncoherentCorrelated,
+  berOrthogonalNoncoherent,
+  FORWARD_RHO,
+} from '../../modem';
+import curve3Json from '../../../public/data/ber-curve3.json';
+
+export interface BerPoint {
+  readonly ebN0Db: number;
+  readonly bits: number;
+  readonly errors: number;
+  readonly ber: number;
+  readonly lo: number;
+  readonly hi: number;
+}
+
+export interface BerChartProps {
+  points: readonly BerPoint[];
+  onClearPoints?: () => void;
+}
+
+const SVG_W = 280;
+const SVG_H = 172;
+const PLOT_X0 = 36;
+const PLOT_X1 = 270;
+const PLOT_Y0 = 12;
+const PLOT_Y1 = 146;
+
+const MIN_DB = 0;
+const MAX_DB = 18;
+const MIN_LOG_BER = -5; // 10^-5
+const MAX_LOG_BER = 0; // 10^0 = 1
+
+function dbToX(db: number): number {
+  const clamped = Math.max(MIN_DB, Math.min(MAX_DB, db));
+  return PLOT_X0 + ((clamped - MIN_DB) / (MAX_DB - MIN_DB)) * (PLOT_X1 - PLOT_X0);
+}
+
+function berToY(ber: number): number {
+  const safe = Number.isFinite(ber) ? Math.max(1e-5, Math.min(1, ber)) : 1e-5;
+  const logVal = Math.log10(safe);
+  const norm = (logVal - MIN_LOG_BER) / (MAX_LOG_BER - MIN_LOG_BER);
+  return PLOT_Y1 - norm * (PLOT_Y1 - PLOT_Y0);
+}
+
+interface StaticCurvesGeometry {
+  curve1Path: string;
+  curve2Path: string;
+  curve3Path: string;
+  curve3BandPolygon: string;
+}
+
+const STATIC_GEOMETRY: StaticCurvesGeometry = (() => {
+  const c1: string[] = [];
+  const c2: string[] = [];
+  for (let step = 0; step <= 36; step++) {
+    const db = step * 0.5;
+    const x = dbToX(db).toFixed(1);
+    const y1 = berToY(berOrthogonalNoncoherent(db)).toFixed(1);
+    const y2 = berToY(berNoncoherentCorrelated(db, FORWARD_RHO)).toFixed(1);
+    c1.push(`${step === 0 ? 'M' : 'L'}${x},${y1}`);
+    c2.push(`${step === 0 ? 'M' : 'L'}${x},${y2}`);
+  }
+
+  const c3: string[] = [];
+  const upperPts: string[] = [];
+  const lowerPts: string[] = [];
+  const n = curve3Json.ebN0Db.length;
+  for (let i = 0; i < n; i++) {
+    const db = curve3Json.ebN0Db[i];
+    const x = dbToX(db).toFixed(1);
+    const yMean = berToY(curve3Json.ber[i]).toFixed(1);
+    const yHi = berToY(curve3Json.hi[i]).toFixed(1);
+    const yLo = berToY(curve3Json.lo[i]).toFixed(1);
+    c3.push(`${i === 0 ? 'M' : 'L'}${x},${yMean}`);
+    upperPts.push(`${x},${yHi}`);
+    lowerPts.unshift(`${x},${yLo}`);
+  }
+
+  return {
+    curve1Path: c1.join(' '),
+    curve2Path: c2.join(' '),
+    curve3Path: c3.join(' '),
+    curve3BandPolygon: [...upperPts, ...lowerPts].join(' '),
+  };
+})();
+
+function formatSciBer(ber: number): string {
+  if (ber <= 0) return '0';
+  if (ber >= 0.01) return `${(ber * 100).toFixed(1)} %`;
+  return ber.toExponential(1);
+}
+
+/**
+ * Plots the three V.23 BER curves (1: orthogonal BFSK, 2: correlated Marcum Q1 h=2/3,
+ * 3: discriminator Monte Carlo with 95% Wilson band) and live PN9 points with 95% intervals
+ * (Requirements 6.2, 6.3, 8.4).
+ */
+export function BerChart({ points, onClearPoints }: BerChartProps): ReactElement {
+  const latest = points.length > 0 ? points[points.length - 1] : null;
+  const srSummary = latest
+    ? `Courbes BER V.23 : ${points.length} point(s) mesuré(s). Dernier point à Eb/N0 ${latest.ebN0Db.toFixed(1)} dB : BER ${formatSciBer(latest.ber)} (intervalle Wilson 95 % de ${formatSciBer(latest.lo)} à ${formatSciBer(latest.hi)} sur ${latest.bits} bits).`
+    : 'Courbes BER V.23 : 3 courbes théoriques affichées (FSK orthogonal, Marcum Q1 h=2/3, discriminateur Monte Carlo). Aucun point PN9 mesuré pour le moment.';
+
+  const dbTicks = [0, 6, 12, 18];
+  const logTicks: readonly { exp: number; label: string }[] = [
+    { exp: 0, label: '1' },
+    { exp: -1, label: '10⁻¹' },
+    { exp: -2, label: '10⁻²' },
+    { exp: -3, label: '10⁻³' },
+    { exp: -4, label: '10⁻⁴' },
+    { exp: -5, label: '10⁻⁵' },
+  ];
+
+  return (
+    <div className="nm-hud-card nm-ber-card" role="region" aria-label="Banc d'essai BER et courbes théoriques">
+      <div className="nm-hud-card-header">
+        <span className="nm-hud-card-title">Courbes BER · Banc PN9</span>
+        {points.length > 0 && onClearPoints ? (
+          <button
+            type="button"
+            className="nm-hud-mini-btn"
+            onClick={onClearPoints}
+          >
+            Effacer ({points.length})
+          </button>
+        ) : (
+          <span className="nm-hud-card-meta">0 – 18 dB</span>
+        )}
+      </div>
+
+      <svg
+        className="nm-ber-svg"
+        viewBox={`0 0 ${SVG_W} ${SVG_H}`}
+        role="img"
+        aria-label={srSummary}
+      >
+        <rect
+          x={PLOT_X0}
+          y={PLOT_Y0}
+          width={PLOT_X1 - PLOT_X0}
+          height={PLOT_Y1 - PLOT_Y0}
+          fill="#0a0d0c"
+          stroke="rgba(235, 228, 214, 0.14)"
+          strokeWidth="1"
+        />
+
+        {/* Horizontal log-BER gridlines */}
+        {logTicks.map((t) => {
+          const y = berToY(Math.pow(10, t.exp));
+          return (
+            <g key={t.exp}>
+              <line
+                x1={PLOT_X0}
+                y1={y}
+                x2={PLOT_X1}
+                y2={y}
+                stroke="rgba(235, 228, 214, 0.08)"
+                strokeWidth="1"
+              />
+              <text
+                x={PLOT_X0 - 4}
+                y={y + 3}
+                textAnchor="end"
+                fill="#8e8677"
+                fontSize="8.5"
+                fontFamily="ui-monospace, monospace"
+              >
+                {t.label}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Vertical Eb/N0 gridlines */}
+        {dbTicks.map((db) => {
+          const x = dbToX(db);
+          return (
+            <g key={db}>
+              <line
+                x1={x}
+                y1={PLOT_Y0}
+                x2={x}
+                y2={PLOT_Y1}
+                stroke="rgba(235, 228, 214, 0.08)"
+                strokeWidth="1"
+              />
+              <text
+                x={x}
+                y={SVG_H - 6}
+                textAnchor="middle"
+                fill="#8e8677"
+                fontSize="8.5"
+                fontFamily="ui-monospace, monospace"
+              >
+                {`${db} dB`}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Curve 3 95% Wilson Monte Carlo band */}
+        <polygon
+          points={STATIC_GEOMETRY.curve3BandPolygon}
+          fill="rgba(229, 184, 75, 0.18)"
+        />
+
+        {/* Curve 1: Orthogonal non-coherent BFSK */}
+        <path
+          d={STATIC_GEOMETRY.curve1Path}
+          fill="none"
+          stroke="#6fd977"
+          strokeWidth="1.3"
+          strokeDasharray="3 2"
+        />
+
+        {/* Curve 2: Correlated non-coherent BFSK (Marcum Q1, h = 2/3) */}
+        <path
+          d={STATIC_GEOMETRY.curve2Path}
+          fill="none"
+          stroke="#64d2ff"
+          strokeWidth="1.4"
+        />
+
+        {/* Curve 3: Our discriminator + 7E1 UART chain (Monte Carlo) */}
+        <path
+          d={STATIC_GEOMETRY.curve3Path}
+          fill="none"
+          stroke="#e5b84b"
+          strokeWidth="1.6"
+        />
+
+        {/* Live measured PN9 points with 95% Wilson intervals */}
+        {points.map((pt) => {
+          const x = dbToX(pt.ebN0Db);
+          const yCenter = berToY(pt.ber);
+          const yLo = berToY(pt.lo);
+          const yHi = berToY(pt.hi);
+          return (
+            <g key={pt.ebN0Db.toFixed(2)}>
+              <line
+                x1={x}
+                y1={yHi}
+                x2={x}
+                y2={yLo}
+                stroke="#ff8a65"
+                strokeWidth="1.5"
+              />
+              <line
+                x1={x - 3}
+                y1={yHi}
+                x2={x + 3}
+                y2={yHi}
+                stroke="#ff8a65"
+                strokeWidth="1.3"
+              />
+              <line
+                x1={x - 3}
+                y1={yLo}
+                x2={x + 3}
+                y2={yLo}
+                stroke="#ff8a65"
+                strokeWidth="1.3"
+              />
+              <circle
+                cx={x}
+                cy={yCenter}
+                r="3.2"
+                fill={pt.errors === 0 ? '#121210' : '#ede7da'}
+                stroke="#ff8a65"
+                strokeWidth="1.6"
+              />
+            </g>
+          );
+        })}
+      </svg>
+
+      <div className="nm-ber-legend" aria-hidden="true">
+        <span className="nm-legend-c1">1. Orthog.</span>
+        <span className="nm-legend-c2">2. Marcum h=2/3</span>
+        <span className="nm-legend-c3">3. Discrim. MC</span>
+        <span className="nm-legend-pt">● Mesure 95%</span>
+      </div>
+
+      {latest ? (
+        <p className="nm-vote-note">
+          {`Dernier point (${latest.ebN0Db.toFixed(1)} dB) : BER ${formatSciBer(latest.ber)} [${formatSciBer(latest.lo)} – ${formatSciBer(latest.hi)}] sur ${latest.bits} bits.`}
+        </p>
+      ) : (
+        <p className="nm-vote-note">
+          Ouvrez 3615 MATHS → BANC pour émettre la séquence PN9 et placer les points mesurés.
+        </p>
+      )}
+
+      <p className="nm-sr-only">{srSummary}</p>
+    </div>
+  );
+}

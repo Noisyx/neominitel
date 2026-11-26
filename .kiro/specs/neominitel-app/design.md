@@ -100,6 +100,21 @@ interface Service<S> {
 - `Seul` and `Serveur`: the page id is known from `ServiceOutput.pageId`; each `pageEnd` screen is added to `votes[pageId]`. A page whose bytes changed (new content) resets its vote.
 - `Écoute` and `Fichier` (including 3615 FANTOME WAVs): at `pageEnd`, compare the screen with the last result of every vote; join the vote with the highest similarity if it is ≥ 80% of non-error cells, otherwise start a new vote.
 - The terminal shows `vote.result()` when the vote toggle is on and at least 2 receptions exist; otherwise the last reception.
+- **Calibration of A4 (task 10.2, recorded per AGENTS.md rule 7; `docs/calibration.md` is owned by Role B):** measured on `sommaire/accueil` across 5 repetitions (`modulate` → `createChannel` AWGN at `Eb/N0` → `StreamingDemodulator` → `VideotexDecoder` → `IncrementalVote`, seeds `0x3615_0001..0x3615_0014`):
+
+  | Eb/N0 (dB) | fs (Hz) | seeds ≤ 1% CER | mean single CER | mean 5-vote CER | worst 5-vote CER |
+  |---|---|---|---|---|---|
+  | 8.0 | 16 000 | 0/20 | 84.92% | 79.60% | 79.60% |
+  | 12.0 | 16 000 | 0/20 | 26.76% | 12.50% | 24.10% |
+  | 13.0 | 16 000 | 14/20 | 11.02% | 0.83% | 2.70% |
+  | 13.5 | 8 000 | 19/20 | 5.61% | 0.09% | 1.20% |
+  | 13.5 | 16 000 | 20/20 | 5.99% | 0.09% | 0.80% |
+  | 13.5 | 48 000 | 9/10 | 5.15% | 0.15% | 1.10% |
+  | **14.0** | 8 000 | **20/20** | 2.90% | 0.01% | 0.10% |
+  | **14.0** | 16 000 | **20/20** | 3.39% | 0.01% | 0.20% |
+  | **14.0** | 48 000 | **10/10** | 2.65% | 0.00% | 0.00% |
+
+  For the same Curve-3 discriminator and UART start/stop framing reason that calibrated `M6` from 12 dB to 16.5 dB (`docs/calibration.md`), `A4` is calibrated from the initial 8 dB target to **Eb/N0 = 14.0 dB** — the first 0.5 dB level where all sample rates pass (2.5 dB below single-pass `M6`, repairing ~30 damaged cells per reception down to ≤ 0.2% CER).
 
 ## State (`useReducer`)
 
@@ -138,7 +153,7 @@ One TypeScript file per service exporting `PageSource` objects, written in Frenc
 | A1 | Services are deterministic: the same input sequence gives byte-identical outputs. |
 | A2 | Navigation (model-based, fast-check commands): no input sequence throws; *Sommaire* always returns the current service's main page; *Connexion/Fin* always returns to the start screen; *Répétition* resends identical bytes. |
 | A3 | Clean loopback: for every page in `content/pages/`, the full `Seul` pipeline with a clean line gives the expected screen exactly. |
-| A4 | Noisy loopback with vote: at Eb/N0 = 8 dB (target, to calibrate) and 5 repetitions, the voted screen matches the reference on ≥ 99% of cells, for 10 seeds. |
+| A4 | Noisy loopback with vote: at Eb/N0 = 14.0 dB (calibrated; design target 8 dB, see "Vote" section above) and 5 repetitions, the voted screen matches the reference on ≥ 99% of cells, for 10 seeds. |
 | A5 | Scheduler: events are applied in `atSample` order and never before their playback time. |
 | A6 | Content lint: every page satisfies the size, alphabet and < 80% similarity rules. |
 | A7 | Reducer: `shown` always has 25 × 40 cells; switching mode never leaves a capture or a transmission running. |

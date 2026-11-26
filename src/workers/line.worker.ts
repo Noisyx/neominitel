@@ -82,6 +82,7 @@ workerScope.onmessage = (event: MessageEvent<ToWorker>): void => {
           pageId: msg.pageId,
           simulate: msg.simulate,
           withConnectionSequence: msg.withConnectionSequence,
+          testPattern: msg.testPattern,
         });
         if (err) {
           postFromWorker(err);

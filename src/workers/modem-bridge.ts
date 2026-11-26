@@ -170,18 +170,32 @@ export function resolveModemProvider(): ModemProvider {
             : undefined,
         });
 
+        let currentSeed = initialSim.seed >>> 0;
         const created = real.createChannel({
           sampleRate,
-          seed: initialSim.seed >>> 0,
+          seed: currentSeed,
           ...toChannelUpdates(initialSim),
         });
         if (created.ok) {
-          const ch = created.value;
+          let ch = created.value;
           return {
             process(chunk: Float32Array): Float32Array {
               return ch.process(chunk);
             },
             setSim(next: SimParams): void {
+              const nextSeed = next.seed >>> 0;
+              if (nextSeed !== currentSeed && real.createChannel) {
+                const recreated = real.createChannel({
+                  sampleRate,
+                  seed: nextSeed,
+                  ...toChannelUpdates(next),
+                });
+                if (recreated.ok) {
+                  ch = recreated.value;
+                  currentSeed = nextSeed;
+                  return;
+                }
+              }
               ch.setParams(toChannelUpdates(next));
             },
             reset(): void {
