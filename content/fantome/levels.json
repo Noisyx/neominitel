@@ -23,7 +23,7 @@
     "hint": "Le bit de parité 7E1 signale les octets endommagés par des blocs hachurés sans décaler le reste de la page : lisez directement le bandeau vert resté intact.",
     "damage": {
       "kind": "noise",
-      "ebN0Db": 12.5
+      "ebN0Db": 13.5
     },
     "feature": "parity",
     "seed": 2003
