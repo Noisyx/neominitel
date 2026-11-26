@@ -24,7 +24,12 @@ export function MinitelShell({
     (online ? `En ligne · ${CHANNELS.forward.baud} / ${CHANNELS.backward.baud} bd` : 'Veille');
 
   return (
-    <section className="nm-shell" aria-label="Terminal NeoMinitel">
+    <section
+      id="nm-terminal-main"
+      tabIndex={-1}
+      className="nm-shell"
+      aria-label="Terminal NeoMinitel"
+    >
       <div className="nm-shell-frame">
         {/* Original SVG top brow with cooling louvres and bevelled industrial ridge */}
         <svg
