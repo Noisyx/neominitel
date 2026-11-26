@@ -75,9 +75,9 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - Benchmark (`scripts/bench-modem.ts`) 60 s of 48 kHz audio in Node; must run in under 3.6 s. Profile the FIR if not. A preliminary run is recorded earlier in `docs/calibration.md`. (Measured: 60 s in about 1.9 s, 31.9 ms per s at most; modulator 24.5 ms per 1 000 characters. No profiling needed. The preliminary run is E7, `docs/math.md` 3.4. Figures in `docs/calibration.md` "Performance".)
   - _Requirements: 13.1-13.2_
 
-- [ ] 14. Backward channel `[STRETCH]`
-  - [ ] 14.1 Backward channel spec in the demodulator, strong forward rejection.
-  - [ ] 14.2 Property test M13.
+- [x] 14. Backward channel `[STRETCH]`
+  - [x] 14.1 Backward channel spec in the demodulator, strong forward rejection.
+  - [x] 14.2 Property test M13.
   - _Requirements: 12.1-12.3_
 
 - [ ] 15. Correlator demodulator `[STRETCH]` (mathematician)
