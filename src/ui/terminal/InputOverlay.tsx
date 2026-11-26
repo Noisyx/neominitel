@@ -1,4 +1,4 @@
-import { useId, type ReactElement } from 'react';
+import { useId, type FormEvent, type ReactElement } from 'react';
 import type { InputFieldSpec } from '../../services';
 
 export interface InputOverlayProps {
@@ -6,25 +6,30 @@ export interface InputOverlayProps {
   value: string;
   onChangeText: (next: string) => void;
   onSubmitEnvoi: () => void;
-  onClearAnnulation: () => void;
 }
 
 /**
  * Touch-accessible text input synchronized with the terminal's local-echo field (Req 4.3 & 4.5).
+ * Submitting the form (Enter / mobile virtual keyboard "Envoyer") triggers Minitel *Envoi*;
+ * visible *Envoi* and *Annulation* keys live once on the Minitel keypad right below.
  */
 export function InputOverlay({
   field,
   value,
   onChangeText,
   onSubmitEnvoi,
-  onClearAnnulation,
 }: InputOverlayProps): ReactElement {
   const inputId = useId();
 
+  const handleSubmit = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    onSubmitEnvoi();
+  };
+
   return (
-    <div className="nm-input-bar">
+    <form className="nm-input-bar" onSubmit={handleSubmit}>
       <label htmlFor={inputId} className="nm-input-label">
-        Saisie Minitel
+        Saisie
       </label>
       <input
         id={inputId}
@@ -32,29 +37,14 @@ export function InputOverlay({
         className="nm-input-field"
         value={value}
         maxLength={field.maxLength}
-        placeholder="MATHS, FANTOME, LIBRE"
+        placeholder="Tapez ici puis touchez Envoi…"
+        enterKeyHint="send"
         autoComplete="off"
         autoCorrect="off"
         autoCapitalize="characters"
         spellCheck={false}
         onChange={(e) => onChangeText(e.target.value)}
       />
-      {value.length > 0 && (
-        <button
-          type="button"
-          className="nm-btn"
-          onClick={onClearAnnulation}
-        >
-          Annulation
-        </button>
-      )}
-      <button
-        type="button"
-        className="nm-btn nm-btn-envoi-inline"
-        onClick={onSubmitEnvoi}
-      >
-        Envoi
-      </button>
-    </div>
+    </form>
   );
 }

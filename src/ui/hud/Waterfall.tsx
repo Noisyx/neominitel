@@ -12,7 +12,7 @@ export interface WaterfallProps {
   bufferRef: MutableRefObject<HudSignalBuffer>;
 }
 
-const CANVAS_W = 280;
+const CANVAS_W = 480;
 const CANVAS_H = WATERFALL_HISTORY_ROWS;
 
 /**
