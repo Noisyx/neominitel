@@ -29,6 +29,8 @@ export type ToWorker =
       simulate: boolean;
       /** When true, prepend the V.23 connection sequence (2100 Hz answer tone + carrier) before the page. */
       withConnectionSequence?: boolean;
+      /** 3615 MATHS bench: stream this many PN9 frames right after the Videotex page completes. */
+      testPattern?: { frames: number };
     }
   | { t: 'ackBlock'; id: number }
   | { t: 'stopTransmit' }
@@ -41,13 +43,27 @@ export type ToWorker =
 
 export type TimedEvent = { atSample: number } & (
   | { e: 'diff'; cells: [row: number, col: number, cell: Cell][] }
+  | {
+      e: 'rxStats';
+      chars: number;
+      parityErrors: number;
+      framingErrors: number;
+      sampleRate: number;
+    }
   | { e: 'pageStart' }
   | { e: 'pageEnd'; screen: Screen }
   | { e: 'carrier'; on: boolean }
   | { e: 'connect' }
   | { e: 'quality'; q: QualityEvent }
-  | { e: 'diag'; d: DiagEvent; spectrumDb: Float32Array }
-  | { e: 'ber'; bits: number; errors: number; lo: number; hi: number }
+  | { e: 'diag'; d: DiagEvent; spectrumDb: Float32Array; sampleRate: number }
+  | {
+      e: 'ber';
+      ebN0Db: number;
+      bits: number;
+      errors: number;
+      lo: number;
+      hi: number;
+    }
   | { e: 'key'; key: FunctionKey }
 );
 

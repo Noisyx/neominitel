@@ -43,28 +43,28 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Depends o
   - Service runs on this device, pages played clean through the speaker, local preview.
   - _Requirements: 2.3_
 
-- [ ] 9. Math HUD `[MVP]`
-  - [ ] 9.1 Waterfall, discriminator trace with threshold and bit windows, eye diagram.
-  - [ ] 9.2 Quality readout, error counters, characters per second, text equivalents.
-  - [ ] 9.3 Toggles: "Accord automatique", "Vote"; HUD hide; frame-rate check.
+- [x] 9. Math HUD `[MVP]`
+  - [x] 9.1 Waterfall, discriminator trace with threshold and bit windows, eye diagram.
+  - [x] 9.2 Quality readout, error counters, characters per second, text equivalents.
+  - [x] 9.3 Toggles: "Accord automatique", "Vote"; HUD hide; frame-rate check.
   - _Requirements: 8.1-8.4_
 
-- [ ] 10. Vote in the app `[MVP]`
-  - [ ] 10.1 Votes per page id (Seul, Serveur), similarity matching (Écoute).
-  - [ ] 10.2 Vote panel; property test A4 (after calibration).
+- [x] 10. Vote in the app `[MVP]`
+  - [x] 10.1 Votes per page id (Seul, Serveur), similarity matching (Écoute).
+  - [x] 10.2 Vote panel; property test A4 (after calibration).
   - _Requirements: 7.1-7.4_
 
 - [ ] 11. 3615 MATHS `[MVP]` (mathematician writes the pages)
   - [ ] 11.1 Six explanation pages with mosaic diagrams.
-  - [ ] 11.2 "Banc d'essai": PN9 frames, BER chart with three curves and live points.
-  - [ ] 11.3 "Vote" page: measured cell error rate after 1/3/5/7 receptions vs formulas.
+  - [x] 11.2 "Banc d'essai": PN9 frames, BER chart with three curves and live points.
+  - [x] 11.3 "Vote" page: measured cell error rate after 1/3/5/7 receptions vs formulas.
   - _Requirements: 6.1-6.4_
 
 - [ ] 12. File mode `[MVP]`
   - Drop or select a WAV, fast decode with progress, optional real-time playback, French error messages.
   - _Requirements: 2.4, 10.4_
 
-- [ ] 13. Simulator controls `[MVP]`
+- [x] 13. Simulator controls `[MVP]`
   - Sliders and toggles, seeded replay.
   - _Requirements: 3.1-3.3_
 

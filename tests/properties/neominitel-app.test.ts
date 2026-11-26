@@ -8,6 +8,9 @@ import { describe, expect, it } from 'vitest';
 import {
   ALL_FUNCTION_KEYS,
   buildPageScreen,
+  cellErrorRate,
+  cloneScreen,
+  createBlankCell,
   createBlankScreen,
   encodePage,
   renderScreenToRgba,
@@ -44,6 +47,33 @@ import {
 } from '../../src/audio/capture';
 import { MicPermission } from '../../src/ui/screens/MicPermission';
 import { LINE_MODE_OPTIONS } from '../../src/ui/screens/ModeBar';
+import { SimControls } from '../../src/ui/screens/SimControls';
+import { BerChart } from '../../src/ui/hud/BerChart';
+import {
+  createHudSignalBuffer,
+  extractEyeTraces,
+  pushDiagToHudBuffer,
+} from '../../src/ui/hud/hudStore';
+import { MathHud } from '../../src/ui/hud/MathHud';
+import { VoteCerPanel } from '../../src/ui/hud/VoteCerPanel';
+import {
+  erasureVoteFailureFormula,
+  majorityVoteFailureFormula,
+  parityUndetectedApprox,
+} from '../../src/ui/hud/voteMetrics';
+import {
+  createEmptyVoteStore,
+  getActiveVoteProgression,
+  getActiveVoteSummary,
+  preparePageVote,
+  recordCompletedPageVote,
+  selectDisplayedScreenForVote,
+} from '../../src/ui/vote-manager';
+import {
+  MATHS_GUIDE_PAGE,
+  MATHS_PROVISIONAL_PAGES,
+  mathsService,
+} from '../../src/services/maths';
 import { createEventScheduler } from '../../src/ui/scheduler';
 import {
   decodePageSourceToScreen,
@@ -469,6 +499,513 @@ describe('neominitel-app Task 7 & 8: Écoute microphone capture, Serveur mode an
   });
 });
 
+describe('neominitel-app Task 9 & 10: Math HUD, screen-reader summaries, toggles, and Vote in the app', () => {
+  it('renders MathHud charts, accessible screen-reader summaries, Accord automatique & Vote toggles, and collapse button', () => {
+    const bufferRef = { current: createHudSignalBuffer() };
+
+    const openHtml = renderToStaticMarkup(
+      createElement(MathHud, {
+        visible: true,
+        onToggleVisible: () => undefined,
+        thresholdMode: 'fixed',
+        onToggleThreshold: () => undefined,
+        voteOn: true,
+        onToggleVote: () => undefined,
+        bufferRef,
+        quality: {
+          type: 'quality',
+          atSample: 4800,
+          snrBandDb: 19.6,
+          snr3kDb: 18.4,
+          ebN0Db: 22.4,
+          parityErrorRate: 0.03,
+          offsetHz: -42,
+        },
+        cps: 120,
+        parityErrors: 3,
+        framingErrors: 1,
+        voteSummary: {
+          pageId: 'sommaire/accueil',
+          receptions: 3,
+          unresolved: 0,
+          lastReceptionErrors: 12,
+        },
+      }),
+    );
+
+    expect(openHtml).toContain('Spectrogramme (0 – 3 kHz)');
+    expect(openHtml).toContain('Discriminateur &amp; fenêtres bits');
+    expect(openHtml).toContain('Diagramme de l');
+    expect(openHtml).toContain('18.4 dB');
+    expect(openHtml).toContain('22.4 dB');
+    expect(openHtml).toContain('-42 Hz');
+    expect(openHtml).toContain('120 car/s');
+    expect(openHtml).toContain('Accord automatique');
+    expect(openHtml).toContain('Vote');
+    expect(openHtml).toContain('Masquer');
+    expect(openHtml).toContain('12 case(s) réparée(s)');
+    // Screen-reader summaries (Requirement 8.4)
+    expect(openHtml).toContain('Spectre 0 à 3 kHz');
+    expect(openHtml).toContain('Sortie du discriminateur');
+    expect(openHtml).toContain('périodes superposées');
+
+    const collapsedHtml = renderToStaticMarkup(
+      createElement(MathHud, {
+        visible: false,
+        onToggleVisible: () => undefined,
+        thresholdMode: 'adaptive',
+        onToggleThreshold: () => undefined,
+        voteOn: false,
+        onToggleVote: () => undefined,
+        bufferRef,
+        cps: 0,
+        parityErrors: 0,
+        framingErrors: 0,
+        voteSummary: null,
+      }),
+    );
+    expect(collapsedHtml).toContain('Afficher le HUD mathématique');
+    expect(collapsedHtml).not.toContain('<canvas');
+  });
+
+  it('populates HudSignalBuffer from live DiagEvent frames and extracts 2-bit eye diagram traces', () => {
+    const sampleRate = 16000;
+    const engine = createLineEngine();
+    expect(engine.init(sampleRate)).toBeNull();
+    const encoded = encodePage(SOMMAIRE_PREVIEW_PAGE_SOURCE);
+    expect(encoded.ok).toBe(true);
+    if (!encoded.ok) return;
+
+    expect(
+      engine.startTransmit({
+        id: 1,
+        bytes: encoded.value.bytes,
+        pageId: SOMMAIRE_PREVIEW_PAGE_SOURCE.id,
+        simulate: false,
+      }),
+    ).toBeNull();
+
+    const buf = createHudSignalBuffer();
+    while (engine.hasActiveTransmit()) {
+      const block = engine.nextTransmitBlock();
+      if (!block) break;
+      for (const ev of block.events) {
+        if (ev.e === 'diag') {
+          pushDiagToHudBuffer(buf, ev.d, ev.spectrumDb, ev.sampleRate);
+        }
+      }
+    }
+
+    expect(buf.waterfallRows.length).toBeGreaterThan(0);
+    expect(buf.sampleCount).toBeGreaterThan(100);
+    expect(buf.bitWindows.length).toBeGreaterThan(0);
+
+    const eyeTraces = extractEyeTraces(buf, 16);
+    expect(eyeTraces.length).toBeGreaterThan(0);
+    for (const tr of eyeTraces) {
+      expect(tr.xNorm.length).toBeGreaterThanOrEqual(2);
+      for (const x of tr.xNorm) {
+        expect(x).toBeGreaterThanOrEqual(0);
+        expect(x).toBeLessThanOrEqual(2);
+      }
+    }
+  });
+
+  it('tracks characters/s, parity & framing errors, per-pageId vote in Seul, and >= 80% similarity vote in Écoute', async () => {
+    const pages = await loadAllContentPages();
+    const pageA = pages[0];
+    const pageB = pages[1];
+    const encA = encodePage(pageA);
+    const encB = encodePage(pageB);
+    expect(encA.ok && encB.ok).toBe(true);
+    if (!encA.ok || !encB.ok) return;
+
+    const cleanA = decodePageSourceToScreen(pageA);
+    const cleanB = decodePageSourceToScreen(pageB);
+
+    // 1. Per-pageId vote in Seul via uiReducer + live toggle of Vote
+    const standby = decodePageSourceToScreen(STANDBY_PAGE_SOURCE);
+    let state = createInitialUiState(standby);
+    const { state: router } = connectRouter();
+    state = uiReducer(state, { type: 'BEGIN_SESSION', router });
+
+    const rx1 = cloneScreen(cleanA);
+    rx1.rows[5][2] = createBlankCell({ error: true });
+    rx1.rows[5][3] = createBlankCell({ error: true });
+
+    const rx2 = cloneScreen(cleanA);
+    rx2.rows[8][10] = createBlankCell({ error: true });
+
+    // Simulate 10 character arrivals at 120 chars/s (every 400 samples @ 48 kHz) with 2 parity + 1 framing error
+    const rxStatsEvents: TimedEvent[] = Array.from({ length: 10 }, (_, idx) => ({
+      atSample: (idx + 1) * 400,
+      e: 'rxStats',
+      chars: 1,
+      parityErrors: idx < 2 ? 1 : 0,
+      framingErrors: idx === 4 ? 1 : 0,
+      sampleRate: 48000,
+    }));
+
+    state = uiReducer(state, { type: 'APPLY_TIMED_EVENTS', events: rxStatsEvents });
+    expect(state.errors).toEqual({ parity: 2, framing: 1 });
+    expect(state.cps).toBeCloseTo(120, 0);
+
+    // Complete reception 1 -> 2 error cells remain on screen
+    state = uiReducer(state, {
+      type: 'APPLY_TIMED_EVENTS',
+      events: [{ atSample: 10000, e: 'pageEnd', screen: rx1 }],
+    });
+    expect(state.cps).toBe(0);
+    expect(getActiveVoteSummary(state.votes)?.receptions).toBe(1);
+    expect(cellErrorRate(state.shown, cleanA)).toBeGreaterThan(0);
+
+    // Press Répétition -> transmit same pageId + same bytes -> complete reception 2 -> vote repairs all cells!
+    state = uiReducer(state, { type: 'UPDATE_ROUTER_FOR_TRANSMIT', router });
+    state = uiReducer(state, {
+      type: 'APPLY_TIMED_EVENTS',
+      events: [{ atSample: 20000, e: 'pageEnd', screen: rx2 }],
+    });
+    expect(getActiveVoteSummary(state.votes)).toEqual({
+      pageId: router.lastOutput.pageId,
+      receptions: 2,
+      unresolved: 0,
+      lastReceptionErrors: 2,
+    });
+    expect(screensEqual(state.baseScreen, cleanA)).toBe(true);
+    expect(
+      screensEqual(
+        state.shown,
+        overlayInputFieldOnScreen(cleanA, router.lastOutput.input, ''),
+      ),
+    ).toBe(true);
+
+    // Toggling Vote off displays lastReception (rx2, which still has 1 error cell); toggling back on restores cleanA
+    state = uiReducer(state, { type: 'TOGGLE_VOTE' });
+    expect(state.voteOn).toBe(false);
+    expect(screensEqual(state.baseScreen, rx2)).toBe(true);
+    expect(
+      screensEqual(
+        state.shown,
+        overlayInputFieldOnScreen(rx2, router.lastOutput.input, ''),
+      ),
+    ).toBe(true);
+    state = uiReducer(state, { type: 'TOGGLE_VOTE' });
+    expect(state.voteOn).toBe(true);
+    expect(screensEqual(state.baseScreen, cleanA)).toBe(true);
+
+    // Changing bytes for the same pageId resets its vote back to 0
+    let store = preparePageVote(
+      state.votes,
+      router.lastOutput.pageId,
+      encB.value.bytes,
+    );
+    expect(getActiveVoteSummary(store)).toBeNull();
+
+    // 2. Écoute mode >= 80% non-error similarity matching across two interleaved pages
+    store = createEmptyVoteStore();
+    const ecouteA1 = cloneScreen(cleanA);
+    const ecouteA2 = cloneScreen(cleanA);
+    for (let c = 0; c < 30; c++) {
+      ecouteA1.rows[4][c] = createBlankCell({ error: true });
+      ecouteA2.rows[10][c] = createBlankCell({ error: true });
+    }
+    const ecouteB1 = cloneScreen(cleanB);
+    for (let c = 0; c < 25; c++) {
+      ecouteB1.rows[6][c] = createBlankCell({ error: true });
+    }
+
+    store = recordCompletedPageVote(store, ecouteA1, 'Ecoute');
+    const idA = store.activePageId;
+    expect(idA).toBe('ecoute/page-1');
+
+    // Distinct page (< 80% similar) creates a second bucket
+    store = recordCompletedPageVote(store, ecouteB1, 'Ecoute');
+    expect(store.activePageId).toBe('ecoute/page-2');
+
+    // Second copy of page A (>= 80% non-error cells equal) joins ecoute/page-1 and repairs it completely
+    store = recordCompletedPageVote(store, ecouteA2, 'Ecoute');
+    expect(store.activePageId).toBe(idA);
+    expect(getActiveVoteSummary(store)?.receptions).toBe(2);
+    expect(getActiveVoteSummary(store)?.unresolved).toBe(0);
+    expect(
+      screensEqual(
+        selectDisplayedScreenForVote(store, true, ecouteA2),
+        cleanA,
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('neominitel-app Task 11.2, 11.3 & 13: 3615 MATHS PN9 BER bench, Vote 1/3/5/7 vs formulas, and SimControls', () => {
+  it('streams PN9 bench frames after maths/banc, emits live BER Wilson intervals, and produces a new point within < 2 s when Eb/N0 changes', () => {
+    const lintReport = lintPages([...MATHS_PROVISIONAL_PAGES, MATHS_GUIDE_PAGE]);
+    expect(lintReport.issues).toEqual([]);
+    expect(lintReport.ok).toBe(true);
+
+    const [initState] = mathsService.init();
+    const [, bancOutput] = mathsService.handle(initState, {
+      kind: 'key',
+      key: 'Envoi',
+      text: 'BANC',
+    });
+    expect(bancOutput).not.toBeNull();
+    expect(bancOutput?.pageId).toBe('maths/banc');
+    expect(bancOutput?.testPattern?.frames).toBeGreaterThan(0);
+    if (!bancOutput) return;
+
+    const sampleRate = 16000;
+    const engine = createLineEngine();
+    expect(engine.init(sampleRate)).toBeNull();
+    engine.setThreshold('adaptive');
+    engine.setSim({
+      ...DEFAULT_SIM_PARAMS,
+      ebN0Db: 10,
+      seed: 0x2026_1125,
+    });
+
+    // Stream maths/banc followed by 360 PN9 frames (3.0 s of bench traffic)
+    expect(
+      engine.startTransmit({
+        id: 1,
+        bytes: bancOutput.bytes,
+        pageId: bancOutput.pageId,
+        simulate: true,
+        testPattern: { frames: 360 },
+      }),
+    ).toBeNull();
+
+    const standby = decodePageSourceToScreen(STANDBY_PAGE_SOURCE);
+    let uiState = createInitialUiState(standby);
+    let sawPageEnd = false;
+    let switchedEbN0 = false;
+    let blocksAfterSwitch = 0;
+    let sawHighSnrPoint = false;
+
+    while (engine.hasActiveTransmit()) {
+      const block = engine.nextTransmitBlock();
+      if (!block) break;
+
+      if (switchedEbN0 && !sawHighSnrPoint) {
+        blocksAfterSwitch++;
+      }
+
+      uiState = uiReducer(uiState, {
+        type: 'APPLY_TIMED_EVENTS',
+        events: block.events,
+      });
+
+      for (const ev of block.events) {
+        if (ev.e === 'pageEnd') {
+          sawPageEnd = true;
+        }
+        if (ev.e === 'ber' && ev.ebN0Db === 10 && !switchedEbN0 && ev.bits >= 400) {
+          // Requirement 6.3: change Eb/N0 during the test and get a new measured point in < 10 s
+          switchedEbN0 = true;
+          engine.setSim({
+            ...DEFAULT_SIM_PARAMS,
+            ebN0Db: 16,
+            seed: 0x2026_9999,
+          });
+        }
+        if (ev.e === 'ber' && ev.ebN0Db === 16) {
+          sawHighSnrPoint = true;
+        }
+      }
+    }
+
+    expect(sawPageEnd).toBe(true);
+    expect(switchedEbN0).toBe(true);
+    expect(sawHighSnrPoint).toBe(true);
+    // 10 blocks = 1.0 s << 10 s ceiling from Requirement 6.3
+    expect(blocksAfterSwitch).toBeLessThanOrEqual(10);
+
+    const pt10 = uiState.berPoints.find((p) => p.ebN0Db === 10);
+    const pt16 = uiState.berPoints.find((p) => p.ebN0Db === 16);
+    expect(pt10).toBeDefined();
+    expect(pt16).toBeDefined();
+    if (pt10 && pt16) {
+      expect(pt10.ber).toBeGreaterThan(0.05);
+      expect(pt10.lo).toBeLessThanOrEqual(pt10.ber);
+      expect(pt10.hi).toBeGreaterThanOrEqual(pt10.ber);
+      expect(pt16.ber).toBeLessThan(0.01);
+    }
+
+    const chartHtml = renderToStaticMarkup(
+      createElement(BerChart, { points: uiState.berPoints }),
+    );
+    expect(chartHtml).toContain('1. Orthog.');
+    expect(chartHtml).toContain('2. Marcum h=2/3');
+    expect(chartHtml).toContain('3. Discrim. MC');
+    expect(chartHtml).toContain('Courbes BER V.23');
+  });
+
+  it('computes 1 / 3 / 5 / 7 reception CER progression next to erasure (p^N) and majority formulas', () => {
+    expect(erasureVoteFailureFormula(0.2, 5)).toBeCloseTo(Math.pow(0.2, 5), 10);
+    expect(majorityVoteFailureFormula(0.1, 3)).toBeCloseTo(
+      3 * 0.01 * 0.9 + 0.001,
+      10,
+    );
+    expect(parityUndetectedApprox(0.01)).toBeCloseTo(28 * 0.0001, 10);
+
+    const votePage = MATHS_PROVISIONAL_PAGES[3];
+    expect(votePage.id).toBe('maths/vote');
+    const encoded = encodePage(votePage);
+    expect(encoded.ok).toBe(true);
+    if (!encoded.ok) return;
+
+    const cleanScreen = decodePageSourceToScreen(votePage);
+    let store = preparePageVote(
+      createEmptyVoteStore(),
+      votePage.id,
+      encoded.value.bytes,
+    );
+
+    // Feed 7 noisy receptions with shrinking disjoint & overlapping erasures
+    for (let rep = 0; rep < 7; rep++) {
+      const rx = cloneScreen(cleanScreen);
+      // Erase 40 cells per reception; cell (2, 0) stays erased for reps 0..3 and recovers on rep 4
+      if (rep < 4) {
+        rx.rows[2][0] = createBlankCell({ error: true });
+      }
+      for (let k = 0; k < 39; k++) {
+        const col = (rep * 7 + k) % SCREEN_COLS;
+        const row = 3 + ((rep * 3 + k) % 18);
+        rx.rows[row][col] = createBlankCell({ error: true });
+      }
+      store = recordCompletedPageVote(store, rx, 'Seul');
+    }
+
+    const prog = getActiveVoteProgression(store);
+    expect(prog).not.toBeNull();
+    if (!prog) return;
+
+    expect(prog.totalReceptions).toBe(7);
+    expect(prog.measuredErasureRate).toBeCloseTo(40 / 1000, 3);
+    expect(prog.measuredUndetectedRate).toBe(0);
+    expect(prog.rows.map((r) => r.receptions)).toEqual([1, 3, 5, 7]);
+
+    const cer1 = prog.rows[0].measuredCer ?? 1;
+    const cer3 = prog.rows[1].measuredCer ?? 1;
+    const cer5 = prog.rows[2].measuredCer ?? 1;
+    const cer7 = prog.rows[3].measuredCer ?? 1;
+    expect(cer1).toBeCloseTo(0.04, 4);
+    expect(cer3).toBeLessThan(cer1);
+    expect(cer5).toBe(0);
+    expect(cer7).toBe(0);
+
+    const panelHtml = renderToStaticMarkup(
+      createElement(VoteCerPanel, {
+        progression: prog,
+        canAutoRepeat: true,
+        autoRepeating: false,
+      }),
+    );
+    expect(panelHtml).toContain('Vote 1 / 3 / 5 / 7 vs formules');
+    expect(panelHtml).toContain('Effac. p^N');
+    expect(panelHtml).toContain('28·ε²');
+  });
+
+  it('renders SimControls, applies mid-page simulator changes within <= 200 ms, and replays seeded runs identically', () => {
+    const simHtml = renderToStaticMarkup(
+      createElement(SimControls, {
+        sim: {
+          ebN0Db: 12.5,
+          offsetHz: -150,
+          clockPct: 0.8,
+          hum: true,
+          bursts: false,
+          seed: 1985,
+        },
+        canReplay: true,
+        onChangeSim: () => undefined,
+        onReplaySeeded: () => undefined,
+      }),
+    );
+    expect(simHtml).toContain('12.5 dB');
+    expect(simHtml).toContain('-150 Hz');
+    expect(simHtml).toContain('+0.8 %');
+    expect(simHtml).toContain('Ronflette 50 Hz');
+    expect(simHtml).toContain('Salves parasites');
+    expect(simHtml).toContain('Rejouer la graine');
+
+    const encoded = encodePage(SOMMAIRE_PREVIEW_PAGE_SOURCE);
+    expect(encoded.ok).toBe(true);
+    if (!encoded.ok) return;
+
+    // 1. Mid-page simulator change takes effect on the very next 100 ms block (<= 200 ms, Req 3.2)
+    const liveEngine = createLineEngine();
+    expect(liveEngine.init(16000)).toBeNull();
+    liveEngine.setSim({ ...DEFAULT_SIM_PARAMS });
+    expect(
+      liveEngine.startTransmit({
+        id: 1,
+        bytes: encoded.value.bytes,
+        pageId: SOMMAIRE_PREVIEW_PAGE_SOURCE.id,
+        simulate: true,
+      }),
+    ).toBeNull();
+
+    const cleanBlock1 = liveEngine.nextTransmitBlock();
+    const cleanBlock2 = liveEngine.nextTransmitBlock();
+    expect(cleanBlock1).not.toBeNull();
+    expect(cleanBlock2).not.toBeNull();
+
+    // Inject severe noise (Eb/N0 = 2 dB) mid-page
+    liveEngine.setSim({
+      ...DEFAULT_SIM_PARAMS,
+      ebN0Db: 2,
+      seed: 0x9876,
+    });
+    const noisyNext1 = liveEngine.nextTransmitBlock();
+    const noisyNext2 = liveEngine.nextTransmitBlock();
+    let errorsWithin200ms = 0;
+    for (const blk of [noisyNext1, noisyNext2]) {
+      for (const ev of blk?.events ?? []) {
+        if (ev.e === 'rxStats') {
+          errorsWithin200ms += ev.parityErrors + ev.framingErrors;
+        }
+      }
+    }
+    expect(errorsWithin200ms).toBeGreaterThan(0);
+
+    // 2. Seeded replay determinism (Req 3.3): identical seed gives cell-for-cell identical noisy screen
+    function runSeededPage(seed: number) {
+      const eng = createLineEngine();
+      eng.init(16000);
+      eng.setSim({
+        ebN0Db: 11.5,
+        offsetHz: 90,
+        clockPct: 0,
+        hum: true,
+        bursts: false,
+        seed,
+      });
+      eng.startTransmit({
+        id: 1,
+        bytes: encoded.ok ? encoded.value.bytes : new Uint8Array(),
+        pageId: SOMMAIRE_PREVIEW_PAGE_SOURCE.id,
+        simulate: true,
+      });
+      let endScreen = createBlankScreen();
+      while (eng.hasActiveTransmit()) {
+        const b = eng.nextTransmitBlock();
+        if (!b) break;
+        for (const ev of b.events) {
+          if (ev.e === 'pageEnd') endScreen = ev.screen;
+        }
+      }
+      return endScreen;
+    }
+
+    const replay1 = runSeededPage(0xabc_def);
+    const replay2 = runSeededPage(0xabc_def);
+    const differentSeed = runSeededPage(0x111_222);
+
+    expect(screensEqual(replay1, replay2)).toBe(true);
+    expect(screensEqual(replay1, differentSeed)).toBe(false);
+  });
+});
+
 describe('neominitel-app Property Tests', () => {
   const runs = (fast: number, slow: number): number => (isSlowTestsEnabled() ? slow : fast);
 
@@ -703,6 +1240,86 @@ describe('neominitel-app Property Tests', () => {
       }
     }
   });
+
+  it('A4 noisy loopback with vote: at Eb/N0 = 14.0 dB (calibrated) and 5 repetitions, the voted screen matches the reference on >= 99% of cells for 10 seeds', () => {
+    const A4_EBN0_DB = 14.0;
+    const REPETITIONS = 5;
+    const page = SOMMAIRE_PREVIEW_PAGE_SOURCE;
+    const built = buildPageScreen(page);
+    const encoded = encodePage(page);
+    expect(built.ok && encoded.ok).toBe(true);
+    if (!built.ok || !encoded.ok) return;
+
+    const refScreen = built.value.screen;
+    const bytes = encoded.value.bytes;
+
+    const configs: readonly { sampleRate: number; seeds: number }[] =
+      isSlowTestsEnabled()
+        ? [
+            { sampleRate: 8000, seeds: 20 },
+            { sampleRate: 16000, seeds: 20 },
+            { sampleRate: 48000, seeds: 10 },
+          ]
+        : [{ sampleRate: 16000, seeds: 10 }];
+
+    for (const { sampleRate, seeds } of configs) {
+      let totalSingleCer = 0;
+
+      for (let seedIdx = 1; seedIdx <= seeds; seedIdx++) {
+        const engine = createLineEngine();
+        expect(engine.init(sampleRate)).toBeNull();
+        engine.setThreshold('adaptive');
+        engine.setSim({
+          ...DEFAULT_SIM_PARAMS,
+          ebN0Db: A4_EBN0_DB,
+          seed: 0x3615_0000 + seedIdx,
+        });
+
+        let voteStore = preparePageVote(createEmptyVoteStore(), page.id, bytes);
+
+        for (let rep = 0; rep < REPETITIONS; rep++) {
+          expect(
+            engine.startTransmit({
+              id: rep + 1,
+              bytes,
+              pageId: page.id,
+              simulate: true,
+              withConnectionSequence: false,
+            }),
+          ).toBeNull();
+
+          let receivedScreen = null;
+          while (engine.hasActiveTransmit()) {
+            const block = engine.nextTransmitBlock();
+            if (!block) break;
+            for (const ev of block.events) {
+              if (ev.e === 'pageEnd') {
+                receivedScreen = ev.screen;
+              }
+            }
+          }
+
+          expect(receivedScreen).not.toBeNull();
+          if (receivedScreen) {
+            totalSingleCer += cellErrorRate(receivedScreen, refScreen);
+            voteStore = recordCompletedPageVote(voteStore, receivedScreen, 'Seul');
+          }
+        }
+
+        const votedScreen = selectDisplayedScreenForVote(
+          voteStore,
+          true,
+          createBlankScreen(),
+        );
+        const votedCer = cellErrorRate(votedScreen, refScreen);
+        expect(votedCer).toBeLessThanOrEqual(0.01);
+      }
+
+      // Sanity check: single receptions under 14 dB AWGN do carry real errors (> 1% CER on average)
+      const meanSingleCer = totalSingleCer / (seeds * REPETITIONS);
+      expect(meanSingleCer).toBeGreaterThan(0.01);
+    }
+  }, 120_000);
 
   it('A5 scheduler: events are applied in atSample order and never before their playback time', () => {
     interface TestItem {

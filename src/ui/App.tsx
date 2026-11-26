@@ -11,7 +11,7 @@ import {
   type ActiveMicCapture,
 } from '../audio/capture';
 import { createGaplessPlayer, type GaplessPlayer } from '../audio/playback';
-import { ANSWER_TONE_HZ, CHANNELS, FRAME, type DiagEvent, type QualityEvent } from '../modem';
+import { ANSWER_TONE_HZ, CHANNELS, FRAME, type QualityEvent } from '../modem';
 import {
   ALL_SERVICE_IDS,
   connectRouter,
@@ -41,6 +41,14 @@ import {
   type ToWorker,
 } from '../workers/protocol';
 import {
+  createHudSignalBuffer,
+  pushDiagToHudBuffer,
+  resetHudSignalBuffer,
+  type HudSignalBuffer,
+} from './hud/hudStore';
+import { type BerPoint } from './hud/BerChart';
+import { MathHud } from './hud/MathHud';
+import {
   createEventScheduler,
   startRafScheduler,
   type EventScheduler,
@@ -51,6 +59,7 @@ import {
   decodePageSourceToScreen,
   STANDBY_PAGE_SOURCE,
 } from './screens/previewPages';
+import { SimControls } from './screens/SimControls';
 import { StartScreen } from './screens/StartScreen';
 import {
   FunctionKeys,
@@ -59,10 +68,24 @@ import {
 import { InputOverlay } from './terminal/InputOverlay';
 import { MinitelShell } from './terminal/MinitelShell';
 import { ScreenCanvas, summarizeScreenForAria } from './terminal/ScreenCanvas';
+import {
+  createEmptyVoteStore,
+  getActiveVoteProgression,
+  getActiveVoteSummary,
+  preparePageVote,
+  recordCompletedPageVote,
+  selectDisplayedScreenForVote,
+  type VoteStore,
+} from './vote-manager';
 
 export type SessionPhase = 'start' | 'connecting' | 'online';
 
 export const NO_CARRIER_TIMEOUT_MS = 10_000;
+
+export interface RxSamplePoint {
+  readonly atSample: number;
+  readonly chars: number;
+}
 
 export interface UiState {
   mode: LineMode;
@@ -83,6 +106,16 @@ export interface UiState {
   palette: PaletteMode;
   crtEnabled: boolean;
   sim: SimParams;
+  threshold: 'fixed' | 'adaptive';
+  voteOn: boolean;
+  votes: VoteStore;
+  hudVisible: boolean;
+  errors: { parity: number; framing: number };
+  cps: number;
+  rxHistory: readonly RxSamplePoint[];
+  rxSampleRate: number;
+  berPoints: readonly BerPoint[];
+  autoRepeatTarget: number;
   quality?: QualityEvent;
   notice?: string;
 }
@@ -90,7 +123,11 @@ export interface UiState {
 export type UiAction =
   | { type: 'SWITCH_MODE'; mode: LineMode; standby: Screen }
   | { type: 'BEGIN_SESSION'; router: RouterState; unmuteSpeaker?: boolean }
-  | { type: 'UPDATE_ROUTER_FOR_TRANSMIT'; router: RouterState }
+  | {
+      type: 'UPDATE_ROUTER_FOR_TRANSMIT';
+      router: RouterState;
+      resetVote?: boolean;
+    }
   | { type: 'UPDATE_LOCAL_ECHO'; router: RouterState }
   | { type: 'DISCONNECT'; standby: Screen; notice?: string }
   | { type: 'MIC_ASKING' }
@@ -104,7 +141,13 @@ export type UiAction =
   | { type: 'APPLY_TIMED_EVENTS'; events: TimedEvent[] }
   | { type: 'TOGGLE_MUTE' }
   | { type: 'TOGGLE_PALETTE' }
-  | { type: 'TOGGLE_CRT' };
+  | { type: 'TOGGLE_CRT' }
+  | { type: 'TOGGLE_HUD_VISIBLE' }
+  | { type: 'TOGGLE_THRESHOLD' }
+  | { type: 'TOGGLE_VOTE' }
+  | { type: 'SET_SIM'; sim: SimParams }
+  | { type: 'CLEAR_BER_POINTS' }
+  | { type: 'START_AUTO_REPEAT'; target: number };
 
 export function createInitialUiState(standby: Screen): UiState {
   return {
@@ -124,6 +167,16 @@ export function createInitialUiState(standby: Screen): UiState {
     palette: 'couleur',
     crtEnabled: true,
     sim: { ...DEFAULT_SIM_PARAMS },
+    threshold: 'fixed',
+    voteOn: true,
+    votes: createEmptyVoteStore(),
+    hudVisible: true,
+    errors: { parity: 0, framing: 0 },
+    cps: 0,
+    rxHistory: [],
+    rxSampleRate: 48000,
+    berPoints: [],
+    autoRepeatTarget: 0,
   };
 }
 
@@ -166,6 +219,17 @@ export function applyTimedEventsToScreen(
   };
 }
 
+function upsertBerPoint(
+  prev: readonly BerPoint[],
+  incoming: BerPoint,
+): readonly BerPoint[] {
+  const roundedDb = Math.round(incoming.ebN0Db * 2) / 2;
+  const filtered = prev.filter(
+    (p) => Math.abs(p.ebN0Db - roundedDb) > 0.05,
+  );
+  return [...filtered, { ...incoming, ebN0Db: roundedDb }];
+}
+
 function activeInputSpec(router: RouterState | null): InputFieldSpec | undefined {
   return router?.lastOutput.input;
 }
@@ -191,12 +255,24 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
         micError: undefined,
         rawOk: undefined,
         rawAudioWarning: null,
+        votes: createEmptyVoteStore(),
+        errors: { parity: 0, framing: 0 },
+        cps: 0,
+        rxHistory: [],
+        berPoints: [],
+        autoRepeatTarget: 0,
+        quality: undefined,
         notice: undefined,
       };
     }
 
     case 'BEGIN_SESSION': {
       const blank = createBlankScreen();
+      const nextVotes = preparePageVote(
+        createEmptyVoteStore(),
+        action.router.lastOutput.pageId,
+        action.router.lastOutput.bytes,
+      );
       return {
         ...state,
         session: 'connecting',
@@ -208,17 +284,37 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
         carrierOn: false,
         noCarrierHint: false,
         muted: action.unmuteSpeaker ? false : state.muted,
+        votes: nextVotes,
+        errors: { parity: 0, framing: 0 },
+        cps: 0,
+        rxHistory: [],
+        berPoints: [],
+        autoRepeatTarget: 0,
+        quality: undefined,
         notice: undefined,
       };
     }
 
     case 'UPDATE_ROUTER_FOR_TRANSMIT': {
+      const baseVotes = action.resetVote ? createEmptyVoteStore() : state.votes;
+      const nextVotes = preparePageVote(
+        baseVotes,
+        action.router.lastOutput.pageId,
+        action.router.lastOutput.bytes,
+      );
+      const samePage =
+        !action.resetVote &&
+        state.router?.lastOutput.pageId === action.router.lastOutput.pageId;
       return {
         ...state,
         session: state.session === 'start' ? 'connecting' : 'online',
         router: action.router,
         shown: overlayInputFieldOnScreen(state.baseScreen, undefined, ''),
         pageComplete: false,
+        votes: nextVotes,
+        cps: 0,
+        rxHistory: [],
+        autoRepeatTarget: samePage ? state.autoRepeatTarget : 0,
         notice: undefined,
       };
     }
@@ -251,6 +347,13 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
         carrierOn: false,
         noCarrierHint: false,
         micState: 'off',
+        votes: createEmptyVoteStore(),
+        errors: { parity: 0, framing: 0 },
+        cps: 0,
+        rxHistory: [],
+        berPoints: [],
+        autoRepeatTarget: 0,
+        quality: undefined,
         notice: action.notice,
       };
 
@@ -265,6 +368,10 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
         carrierOn: false,
         baseScreen: blank,
         shown: blank,
+        votes: createEmptyVoteStore(),
+        errors: { parity: 0, framing: 0 },
+        cps: 0,
+        rxHistory: [],
       };
     }
 
@@ -308,12 +415,27 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
       let nextQuality = state.quality;
       let nextAria = state.completedAriaSummary;
       let nextPageComplete = state.pageComplete;
+      let nextVotes = state.votes;
+      let nextParity = state.errors.parity;
+      let nextFraming = state.errors.framing;
+      let nextSampleRate = state.rxSampleRate;
+      let nextCps = state.cps;
+      let rxHistoryMut: RxSamplePoint[] | null = null;
+      let nextBerPoints = state.berPoints;
+      let nextAutoRepeatTarget = state.autoRepeatTarget;
 
       const { screen: diffedBase } = applyTimedEventsToScreen(
         state.baseScreen,
         action.events,
       );
       let nextBase = diffedBase;
+
+      const getMutableHistory = (): RxSamplePoint[] => {
+        if (rxHistoryMut === null) {
+          rxHistoryMut = state.rxHistory.slice();
+        }
+        return rxHistoryMut;
+      };
 
       for (const ev of action.events) {
         switch (ev.e) {
@@ -332,8 +454,46 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
               if (nextSession === 'connecting') {
                 nextSession = 'online';
               }
+            } else {
+              nextCps = 0;
+              rxHistoryMut = [];
             }
             break;
+          case 'rxStats': {
+            nextParity += ev.parityErrors;
+            nextFraming += ev.framingErrors;
+            if (ev.sampleRate > 0) {
+              nextSampleRate = ev.sampleRate;
+            }
+            const hist = getMutableHistory();
+            if (
+              hist.length > 0 &&
+              ev.atSample < hist[hist.length - 1].atSample
+            ) {
+              hist.length = 0;
+            }
+            hist.push({ atSample: ev.atSample, chars: ev.chars });
+            const windowSamples = 0.5 * nextSampleRate;
+            while (
+              hist.length > 0 &&
+              ev.atSample - hist[0].atSample > windowSamples
+            ) {
+              hist.shift();
+            }
+            if (hist.length >= 2) {
+              const dtSec =
+                (hist[hist.length - 1].atSample - hist[0].atSample) /
+                nextSampleRate;
+              if (dtSec >= 0.015) {
+                let totalAfterFirst = 0;
+                for (let i = 1; i < hist.length; i++) {
+                  totalAfterFirst += hist[i].chars;
+                }
+                nextCps = Math.min(999, totalAfterFirst / dtSec);
+              }
+            }
+            break;
+          }
           case 'diff':
             nextNoCarrierHint = false;
             break;
@@ -344,14 +504,52 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
             nextNoCarrierHint = false;
             nextPageComplete = false;
             break;
-          case 'pageEnd':
-            nextBase = ev.screen;
+          case 'pageEnd': {
+            nextVotes = recordCompletedPageVote(nextVotes, ev.screen, state.mode);
+            nextBase = selectDisplayedScreenForVote(
+              nextVotes,
+              state.voteOn,
+              ev.screen,
+            );
             nextPageComplete = true;
-            nextAria = summarizeScreenForAria(ev.screen);
+            nextAria = summarizeScreenForAria(nextBase);
+            nextCps = 0;
+            rxHistoryMut = [];
+            const activeSummary = getActiveVoteSummary(nextVotes);
+            if (
+              nextAutoRepeatTarget > 0 &&
+              activeSummary &&
+              activeSummary.receptions >= nextAutoRepeatTarget
+            ) {
+              nextAutoRepeatTarget = 0;
+            }
             break;
-          case 'quality':
+          }
+          case 'ber': {
+            const ber = ev.bits > 0 ? ev.errors / ev.bits : 0;
+            nextBerPoints = upsertBerPoint(nextBerPoints, {
+              ebN0Db: ev.ebN0Db,
+              bits: ev.bits,
+              errors: ev.errors,
+              ber,
+              lo: ev.lo,
+              hi: ev.hi,
+            });
+            break;
+          }
+          case 'quality': {
             nextQuality = ev.q;
+            const histRef = rxHistoryMut ?? state.rxHistory;
+            if (
+              histRef.length > 0 &&
+              ev.atSample - histRef[histRef.length - 1].atSample >
+                0.25 * nextSampleRate
+            ) {
+              nextCps = 0;
+              rxHistoryMut = [];
+            }
             break;
+          }
           default:
             break;
         }
@@ -367,6 +565,10 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
             )
           : nextBase;
 
+      const errorsChanged =
+        nextParity !== state.errors.parity ||
+        nextFraming !== state.errors.framing;
+
       return {
         ...state,
         session: nextSession,
@@ -377,6 +579,15 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
         shown: nextShown,
         pageComplete: nextPageComplete,
         completedAriaSummary: nextAria,
+        votes: nextVotes,
+        errors: errorsChanged
+          ? { parity: nextParity, framing: nextFraming }
+          : state.errors,
+        cps: nextCps,
+        rxHistory: rxHistoryMut ?? state.rxHistory,
+        rxSampleRate: nextSampleRate,
+        berPoints: nextBerPoints,
+        autoRepeatTarget: nextAutoRepeatTarget,
         quality: nextQuality,
       };
     }
@@ -392,6 +603,47 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
 
     case 'TOGGLE_CRT':
       return { ...state, crtEnabled: !state.crtEnabled };
+
+    case 'TOGGLE_HUD_VISIBLE':
+      return { ...state, hudVisible: !state.hudVisible };
+
+    case 'TOGGLE_THRESHOLD':
+      return {
+        ...state,
+        threshold: state.threshold === 'adaptive' ? 'fixed' : 'adaptive',
+      };
+
+    case 'TOGGLE_VOTE': {
+      const nextVoteOn = !state.voteOn;
+      if (!state.pageComplete) {
+        return { ...state, voteOn: nextVoteOn };
+      }
+      const nextBase = selectDisplayedScreenForVote(
+        state.votes,
+        nextVoteOn,
+        state.baseScreen,
+      );
+      const field = activeInputSpec(state.router);
+      const nextShown = state.router
+        ? overlayInputFieldOnScreen(nextBase, field, state.router.inputBuffer)
+        : nextBase;
+      return {
+        ...state,
+        voteOn: nextVoteOn,
+        baseScreen: nextBase,
+        shown: nextShown,
+        completedAriaSummary: summarizeScreenForAria(nextBase),
+      };
+    }
+
+    case 'SET_SIM':
+      return { ...state, sim: { ...action.sim } };
+
+    case 'CLEAR_BER_POINTS':
+      return { ...state, berPoints: [] };
+
+    case 'START_AUTO_REPEAT':
+      return { ...state, autoRepeatTarget: action.target };
   }
 }
 
@@ -418,9 +670,7 @@ export function App(): ReactElement {
     createEventScheduler<TimedEvent>(),
   );
   const txIdRef = useRef<number>(0);
-  const latestDiagRef = useRef<{ d: DiagEvent; spectrumDb: Float32Array } | null>(
-    null,
-  );
+  const hudBufferRef = useRef<HudSignalBuffer>(createHudSignalBuffer());
 
   const postToWorker = useCallback(
     (msg: ToWorker, transfer?: Transferable[]): void => {
@@ -462,16 +712,9 @@ export function App(): ReactElement {
           if (msg.id !== txIdRef.current) {
             return;
           }
-          const nonDiagEvents: TimedEvent[] = [];
-          for (const ev of msg.events) {
-            if (ev.e === 'diag') {
-              latestDiagRef.current = { d: ev.d, spectrumDb: ev.spectrumDb };
-            } else {
-              nonDiagEvents.push(ev);
-            }
-          }
-          if (nonDiagEvents.length > 0) {
-            schedulerRef.current.enqueue(nonDiagEvents);
+          // Enqueue all events (including diag) so HUD canvases draw in exact sync with audio playback
+          if (msg.events.length > 0) {
+            schedulerRef.current.enqueue(msg.events);
           }
 
           playerRef.current?.scheduleBlock({
@@ -494,7 +737,12 @@ export function App(): ReactElement {
           const nonDiag: TimedEvent[] = [];
           for (const ev of msg.events) {
             if (ev.e === 'diag') {
-              latestDiagRef.current = { d: ev.d, spectrumDb: ev.spectrumDb };
+              pushDiagToHudBuffer(
+                hudBufferRef.current,
+                ev.d,
+                ev.spectrumDb,
+                ev.sampleRate,
+              );
             } else {
               nonDiag.push(ev);
             }
@@ -508,6 +756,7 @@ export function App(): ReactElement {
         case 'error': {
           stopAllPipelines();
           workerInitializedRef.current = false;
+          resetHudSignalBuffer(hudBufferRef.current);
           dispatch({
             type: 'DISCONNECT',
             standby: standbyScreen,
@@ -526,6 +775,7 @@ export function App(): ReactElement {
       workerRef.current = null;
       workerInitializedRef.current = false;
       stopAllPipelines();
+      resetHudSignalBuffer(hudBufferRef.current);
       dispatch({
         type: 'DISCONNECT',
         standby: standbyScreen,
@@ -546,7 +796,22 @@ export function App(): ReactElement {
       scheduler,
       () => playerRef.current?.currentSample() ?? 0,
       (dueEvents) => {
-        dispatch({ type: 'APPLY_TIMED_EVENTS', events: dueEvents });
+        const reducerEvents: TimedEvent[] = [];
+        for (const ev of dueEvents) {
+          if (ev.e === 'diag') {
+            pushDiagToHudBuffer(
+              hudBufferRef.current,
+              ev.d,
+              ev.spectrumDb,
+              ev.sampleRate,
+            );
+          } else {
+            reducerEvents.push(ev);
+          }
+        }
+        if (reducerEvents.length > 0) {
+          dispatch({ type: 'APPLY_TIMED_EVENTS', events: reducerEvents });
+        }
       },
     );
 
@@ -611,6 +876,7 @@ export function App(): ReactElement {
     }
 
     workerInitializedRef.current = false;
+    resetHudSignalBuffer(hudBufferRef.current);
     postToWorker(
       {
         t: 'capturePort',
@@ -619,6 +885,7 @@ export function App(): ReactElement {
       },
       [capture.workerPort],
     );
+    postToWorker({ t: 'setThreshold', mode: stateRef.current.threshold });
 
     dispatch({
       type: 'MIC_STARTED',
@@ -632,6 +899,7 @@ export function App(): ReactElement {
       stopAllPipelines();
       postToWorker({ t: 'reset' });
       workerInitializedRef.current = false;
+      resetHudSignalBuffer(hudBufferRef.current);
       dispatch({ type: 'SWITCH_MODE', mode: nextMode, standby: standbyScreen });
 
       if (nextMode === 'Ecoute') {
@@ -642,7 +910,11 @@ export function App(): ReactElement {
   );
 
   const transmitServiceOutput = useCallback(
-    async (output: ServiceOutput, withConnectionSequence: boolean): Promise<void> => {
+    async (
+      output: ServiceOutput,
+      withConnectionSequence: boolean,
+      forceReinit = false,
+    ): Promise<void> => {
       const player = playerRef.current;
       if (!player) return;
 
@@ -661,13 +933,14 @@ export function App(): ReactElement {
       const nextId = txIdRef.current + 1;
       txIdRef.current = nextId;
 
-      if (!workerInitializedRef.current || withConnectionSequence) {
+      if (!workerInitializedRef.current || withConnectionSequence || forceReinit) {
         postToWorker({ t: 'init', sampleRate });
         workerInitializedRef.current = true;
       } else {
         postToWorker({ t: 'stopTransmit' });
       }
 
+      postToWorker({ t: 'setThreshold', mode: stateRef.current.threshold });
       postToWorker({ t: 'setSim', sim: stateRef.current.sim });
       postToWorker({
         t: 'transmit',
@@ -677,6 +950,7 @@ export function App(): ReactElement {
         // Serveur mode plays clean V.23 audio on the speaker; Seul mode runs through the simulator
         simulate: !isServerMode,
         withConnectionSequence,
+        testPattern: output.testPattern,
       });
     },
     [postToWorker, spawnLineWorker],
@@ -686,6 +960,7 @@ export function App(): ReactElement {
     stopAllPipelines();
     postToWorker({ t: 'reset' });
     workerInitializedRef.current = false;
+    resetHudSignalBuffer(hudBufferRef.current);
     dispatch({ type: 'DISCONNECT', standby: standbyScreen });
   }, [postToWorker, standbyScreen, stopAllPipelines]);
 
@@ -795,6 +1070,92 @@ export function App(): ReactElement {
     playerRef.current?.setMuted(nextMuted);
     dispatch({ type: 'TOGGLE_MUTE' });
   }, []);
+
+  const handleToggleThreshold = useCallback((): void => {
+    const nextMode =
+      stateRef.current.threshold === 'adaptive' ? 'fixed' : 'adaptive';
+    postToWorker({ t: 'setThreshold', mode: nextMode });
+    dispatch({ type: 'TOGGLE_THRESHOLD' });
+  }, [postToWorker]);
+
+  const handleToggleVote = useCallback((): void => {
+    dispatch({ type: 'TOGGLE_VOTE' });
+  }, []);
+
+  const handleToggleHudVisible = useCallback((): void => {
+    dispatch({ type: 'TOGGLE_HUD_VISIBLE' });
+  }, []);
+
+  const handleChangeSim = useCallback(
+    (nextSim: SimParams): void => {
+      stateRef.current = { ...stateRef.current, sim: nextSim };
+      dispatch({ type: 'SET_SIM', sim: nextSim });
+      postToWorker({ t: 'setSim', sim: nextSim });
+    },
+    [postToWorker],
+  );
+
+  const handleReplaySeeded = useCallback((): void => {
+    const current = stateRef.current;
+    if (current.mode !== 'Seul' || !current.router) {
+      return;
+    }
+    resetHudSignalBuffer(hudBufferRef.current);
+    dispatch({
+      type: 'UPDATE_ROUTER_FOR_TRANSMIT',
+      router: current.router,
+      resetVote: true,
+    });
+    void transmitServiceOutput(current.router.lastOutput, false, true);
+  }, [transmitServiceOutput]);
+
+  const handleClearBerPoints = useCallback((): void => {
+    dispatch({ type: 'CLEAR_BER_POINTS' });
+  }, []);
+
+  const handleRunSevenReceptions = useCallback((): void => {
+    const current = stateRef.current;
+    if (current.mode !== 'Seul' || !current.router) {
+      return;
+    }
+    dispatch({ type: 'START_AUTO_REPEAT', target: 7 });
+    if (current.pageComplete) {
+      const { state: nextRouter, effect } = stepRouterKey(
+        current.router,
+        'Repetition',
+      );
+      applyRouterOutcome(nextRouter, effect);
+    }
+  }, [applyRouterOutcome]);
+
+  // Automatic repetition loop when measuring 1/3/5/7 vote receptions in Seul mode
+  useEffect(() => {
+    if (
+      state.mode !== 'Seul' ||
+      state.session !== 'online' ||
+      !state.pageComplete ||
+      state.autoRepeatTarget <= 0 ||
+      !state.router
+    ) {
+      return;
+    }
+    const doneCount = getActiveVoteSummary(state.votes)?.receptions ?? 0;
+    if (doneCount >= state.autoRepeatTarget) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      handleFunctionKey('Repetition');
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [
+    handleFunctionKey,
+    state.autoRepeatTarget,
+    state.mode,
+    state.pageComplete,
+    state.router,
+    state.session,
+    state.votes,
+  ]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -948,120 +1309,164 @@ export function App(): ReactElement {
       )}
 
       <main className="nm-stage">
-        <MinitelShell
-          online={state.session === 'online'}
-          statusLabel={statusLabel}
-          footerSlot={
-            <div className="nm-terminal-controls">
-              {state.mode === 'Serveur' && state.session !== 'start' && (
-                <div
-                  className="nm-server-bar"
-                  role="group"
-                  aria-label="Diffusion rapide mode Serveur"
-                >
-                  <span className="nm-server-bar-label">
-                    Diffuser sur haut-parleur :
-                  </span>
-                  <div className="nm-server-pills">
-                    {ALL_SERVICE_IDS.map((svcId) => (
-                      <button
-                        key={svcId}
-                        type="button"
-                        className="nm-btn"
-                        aria-pressed={state.router?.activeServiceId === svcId}
-                        onClick={() => handleQuickLaunchService(svcId)}
-                      >
-                        3615 {svcId}
-                      </button>
-                    ))}
+        <div
+          className="nm-workspace"
+          data-hud-open={state.hudVisible ? 'true' : 'false'}
+        >
+          <MinitelShell
+            online={state.session === 'online'}
+            statusLabel={statusLabel}
+            footerSlot={
+              <div className="nm-terminal-controls">
+                {state.mode === 'Serveur' && state.session !== 'start' && (
+                  <div
+                    className="nm-server-bar"
+                    role="group"
+                    aria-label="Diffusion rapide mode Serveur"
+                  >
+                    <span className="nm-server-bar-label">
+                      Diffuser sur haut-parleur :
+                    </span>
+                    <div className="nm-server-pills">
+                      {ALL_SERVICE_IDS.map((svcId) => (
+                        <button
+                          key={svcId}
+                          type="button"
+                          className="nm-btn"
+                          aria-pressed={state.router?.activeServiceId === svcId}
+                          onClick={() => handleQuickLaunchService(svcId)}
+                        >
+                          3615 {svcId}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {isInteractiveServiceMode &&
-                state.session === 'online' &&
-                currentField &&
-                state.router && (
-                  <InputOverlay
-                    field={currentField}
-                    value={state.router.inputBuffer}
-                    onChangeText={handleSetInputText}
-                    onSubmitEnvoi={() => handleFunctionKey('Envoi')}
-                    onClearAnnulation={() => handleFunctionKey('Annulation')}
+                {isInteractiveServiceMode &&
+                  state.session === 'online' &&
+                  currentField &&
+                  state.router && (
+                    <InputOverlay
+                      field={currentField}
+                      value={state.router.inputBuffer}
+                      onChangeText={handleSetInputText}
+                      onSubmitEnvoi={() => handleFunctionKey('Envoi')}
+                      onClearAnnulation={() => handleFunctionKey('Annulation')}
+                    />
+                  )}
+
+                {isInteractiveServiceMode && (
+                  <FunctionKeys
+                    online={state.session !== 'start'}
+                    onPressKey={handleFunctionKey}
                   />
                 )}
 
-              {isInteractiveServiceMode && (
-                <FunctionKeys
-                  online={state.session !== 'start'}
-                  onPressKey={handleFunctionKey}
+                {state.mode === 'Seul' && (
+                  <SimControls
+                    sim={state.sim}
+                    canReplay={state.session !== 'start' && state.router !== null}
+                    onChangeSim={handleChangeSim}
+                    onReplaySeeded={handleReplaySeeded}
+                  />
+                )}
+
+                {state.mode === 'Ecoute' && state.micState === 'on' && (
+                  <div className="nm-server-bar">
+                    <span className="nm-server-bar-label">
+                      Microphone actif — les pages V.23 reçues se dessinent automatiquement.
+                    </span>
+                    <button
+                      type="button"
+                      className="nm-btn nm-btn-fin"
+                      onClick={handleDisconnect}
+                    >
+                      Couper l&apos;écoute
+                    </button>
+                  </div>
+                )}
+              </div>
+            }
+          >
+            <div style={{ position: 'relative' }}>
+              <ScreenCanvas
+                screen={state.shown}
+                palette={state.palette}
+                crt={state.crtEnabled}
+                ariaSummary={state.completedAriaSummary}
+              />
+
+              {(state.mode === 'Seul' || state.mode === 'Serveur') &&
+                state.session === 'start' && (
+                  <StartScreen
+                    mode={state.mode}
+                    onConnect={() => void handleConnect()}
+                  />
+                )}
+
+              {state.mode === 'Ecoute' && state.micState !== 'on' && (
+                <MicPermission
+                  micState={state.micState}
+                  errorMessage={state.micError}
+                  onRequestMic={() => void startEcouteMicrophone()}
+                  onFallbackSeul={() => handleSelectMode('Seul')}
                 />
               )}
 
-              {state.mode === 'Ecoute' && state.micState === 'on' && (
-                <div className="nm-server-bar">
-                  <span className="nm-server-bar-label">
-                    Microphone actif — les pages V.23 reçues se dessinent automatiquement.
-                  </span>
+              {state.mode === 'Fichier' && (
+                <div
+                  className="nm-start-overlay"
+                  role="region"
+                  aria-label="Mode Fichier WAV"
+                >
+                  <p className="nm-start-memorial">Décodage de fichier WAV</p>
+                  <p className="nm-start-caption">
+                    L&apos;importation par glisser-déposer de fichiers WAV est prévue au jalon
+                    J11 (tâche 12).
+                  </p>
                   <button
                     type="button"
-                    className="nm-btn nm-btn-fin"
-                    onClick={handleDisconnect}
+                    className="nm-btn nm-btn-connexion"
+                    onClick={() => handleSelectMode('Seul')}
                   >
-                    Couper l&apos;écoute
+                    Retour au mode Seul
                   </button>
                 </div>
               )}
             </div>
-          }
-        >
-          <div style={{ position: 'relative' }}>
-            <ScreenCanvas
-              screen={state.shown}
-              palette={state.palette}
-              crt={state.crtEnabled}
-              ariaSummary={state.completedAriaSummary}
-            />
+          </MinitelShell>
 
-            {(state.mode === 'Seul' || state.mode === 'Serveur') &&
-              state.session === 'start' && (
-                <StartScreen
-                  mode={state.mode}
-                  onConnect={() => void handleConnect()}
-                />
-              )}
-
-            {state.mode === 'Ecoute' && state.micState !== 'on' && (
-              <MicPermission
-                micState={state.micState}
-                errorMessage={state.micError}
-                onRequestMic={() => void startEcouteMicrophone()}
-                onFallbackSeul={() => handleSelectMode('Seul')}
-              />
-            )}
-
-            {state.mode === 'Fichier' && (
-              <div
-                className="nm-start-overlay"
-                role="region"
-                aria-label="Mode Fichier WAV"
-              >
-                <p className="nm-start-memorial">Décodage de fichier WAV</p>
-                <p className="nm-start-caption">
-                  L&apos;importation par glisser-déposer de fichiers WAV est prévue au jalon
-                  J11 (tâche 12).
-                </p>
-                <button
-                  type="button"
-                  className="nm-btn nm-btn-connexion"
-                  onClick={() => handleSelectMode('Seul')}
-                >
-                  Retour au mode Seul
-                </button>
-              </div>
-            )}
-          </div>
-        </MinitelShell>
+          <MathHud
+            visible={state.hudVisible}
+            onToggleVisible={handleToggleHudVisible}
+            thresholdMode={state.threshold}
+            onToggleThreshold={handleToggleThreshold}
+            voteOn={state.voteOn}
+            onToggleVote={handleToggleVote}
+            bufferRef={hudBufferRef}
+            quality={state.quality}
+            cps={state.cps}
+            parityErrors={state.errors.parity}
+            framingErrors={state.errors.framing}
+            voteSummary={getActiveVoteSummary(state.votes)}
+            berPoints={state.berPoints}
+            onClearBerPoints={handleClearBerPoints}
+            showBerChart={state.router?.activeServiceId === 'MATHS'}
+            voteProgression={getActiveVoteProgression(state.votes)}
+            showVoteCerPanel={
+              state.router?.lastOutput.pageId === 'maths/vote' ||
+              (getActiveVoteSummary(state.votes)?.receptions ?? 0) >= 2
+            }
+            canAutoRepeatVote={
+              state.mode === 'Seul' &&
+              state.session !== 'start' &&
+              state.router !== null
+            }
+            autoRepeatingVote={state.autoRepeatTarget > 0}
+            onRunSevenReceptions={handleRunSevenReceptions}
+          />
+        </div>
       </main>
     </div>
   );
