@@ -392,3 +392,30 @@ Reading of the measured curve 3 (`public/data/ber-curve3.json`, 10 seeds per poi
   and 2 dB (curve 2) table points.
 - The open question of section 3.6 (the reference detector beating curve 2 at 9 dB) concerns the
   raw bit error rate of a detector with known timing, so it is not answered by curve 3.
+
+---
+
+## 7. Vote formulas (review of `videotex/design.md` "Math notes", J9)
+
+Reviewed by Role B against Role A's implementation (`src/ui/hud/voteMetrics.ts`). Status of each
+formula, for N receptions of one cell, damaged independently from one reception to the next:
+
+| Formula | Code | Verdict |
+|---|---|---|
+| Erasures only (every damage detected, probability p): the vote fails only if all N copies are erased, P_fail = pᴺ | `erasureVoteFailureFormula` | Correct (`Identity` under independence). Property V8 is its exact, deterministic form. |
+| Undetected damage only (wrong value, probability q): plain majority fails when more than N/2 copies are wrong, P_fail = Σ_{k > N/2} C(N, k) qᵏ (1 − q)ᴺ⁻ᵏ | `majorityVoteFailureFormula` | Correct for odd N (1, 3, 5, 7 in 3615 MATHS). It is an upper bound: it counts any wrong majority as a failure, while the wrong copies must also agree on the same wrong value to win. (`Identity`; V9 is the exact form.) |
+| Parity: one even-parity bit over 8 checked bits detects every odd number of bit errors and no even number; P(undetected) ≈ C(8, 2) ε² = 28 ε² for small bit error rate ε | `parityUndetectedApprox` | Correct to first order (`Identity`). The next term, C(8, 4) ε⁴ = 70 ε⁴, is negligible below ε = 10⁻². |
+
+Worked values for the page: p = q = 0.1 and N = 5 give P_fail = 10⁻⁵ (erasures) and 8.6·10⁻³
+(majority bound). Erasures are far cheaper to repair than undetected errors, which is why the
+parity bit matters.
+
+**Why the measurements sit above the formulas at low Eb/N0 (Hypothesis, see `docs/calibration.md`
+"A4").** All three formulas assume that each cell is damaged independently, at a fixed position.
+Below about 13 dB, misaligned frames shift the Videotex cursor, so damage spreads over many cells
+and repeats differently in each reception; the measured cell error rate after the vote is then much
+higher than pᴺ. From 14 dB the independence assumption is close to true and the vote behaves as the
+formulas predict (A4: 3 % of damaged cells per reception, 0.01 % after 5 receptions).
+
+Framing errors are counted as erasures too: the app flags a cell as damaged when parity or stop
+bit is wrong (`src/workers/line-engine.ts`), which matches the erasure model.
