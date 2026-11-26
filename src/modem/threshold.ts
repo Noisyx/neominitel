@@ -30,6 +30,12 @@ export const ADAPTIVE_INIT_MS = 20;
 export const ADAPTIVE_INIT_MAX_STD_HZ = 500;
 export const ADAPTIVE_INIT_MAX_OFFSET_HZ = 500;
 /**
+ * The same gates as fractions of the tone gap (task 14), so that they apply to both channels:
+ * 500 / 800 Hz forward (unchanged), i.e. 37.5 Hz for the 60 Hz backward gap.
+ */
+export const ADAPTIVE_INIT_MAX_STD_GAP = ADAPTIVE_INIT_MAX_STD_HZ / 800;
+export const ADAPTIVE_INIT_MAX_OFFSET_GAP = ADAPTIVE_INIT_MAX_OFFSET_HZ / 800;
+/**
  * If no window qualifies within this time after carrier on, the UART starts with the nominal
  * threshold and no further window is tried until the next carrier on (below Eb/N0 ~ 8 dB no 20 ms
  * window is steady enough). Longer than the default answer tone + silence (850 ms), so a noisy

@@ -2462,8 +2462,11 @@ describe('v23-modem task 7: streaming demodulator', () => {
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.error).toMatchObject({ kind: 'bad-option', option: 'threshold' });
     }
-    const back = createDemodulator({ sampleRate: 48000, channel: 'backward', threshold: 'fixed' });
-    expect(back).toMatchObject({ ok: false, error: { kind: 'bad-option', option: 'channel' } });
+    // Task 14: the backward channel is accepted (it was bad-option until then, decision T7-7);
+    // an unknown channel still is not.
+    expect(createDemodulator({ sampleRate: 48000, channel: 'backward', threshold: 'fixed' }).ok).toBe(true);
+    const unknown = createDemodulator({ sampleRate: 48000, channel: 'sideways' as never, threshold: 'fixed' });
+    expect(unknown).toMatchObject({ ok: false, error: { kind: 'bad-option', option: 'channel' } });
     expect(createDemodulator({ sampleRate: 48000, threshold: 'fixed', carrierOnDbfs: Number.NaN })).toMatchObject({
       ok: false,
       error: { kind: 'bad-option', option: 'carrierOnDbfs' },
@@ -3804,5 +3807,98 @@ describe('v23-modem task 12: calibration', () => {
     expect(adaptive.length).toBeGreaterThan(fixed.length / 2);
     // The signal lasts several times the timeout, so the UART cannot have waited longer than it.
     expect(adaptive[0].atSample).toBeLessThan(Math.round((ADAPTIVE_INIT_TIMEOUT_MS / 1000 + 0.2) * fs));
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 14: backward channel (requirement 12, design.md "Backward channel")
+
+const BACK = CHANNELS.backward;
+const BACK_TEXT = Uint8Array.from(ascii('3615 NEOMINITEL'));
+
+function demodChannel(x: Float32Array, fs: number, channel: 'forward' | 'backward', threshold: 'fixed' | 'adaptive'): DemodEvent[] {
+  const r = createDemodulator({ sampleRate: fs, channel, threshold });
+  if (!r.ok) throw new Error(JSON.stringify(r.error));
+  return [...r.value.push(x), ...r.value.flush()];
+}
+
+function exactChars(events: readonly DemodEvent[], bytes: Uint8Array): boolean {
+  const c = charsOf(events);
+  return c.length === bytes.length && c.every((e, i) => e.value === bytes[i] && e.parityOk && e.framingOk);
+}
+
+/** Forward PN9 traffic and the backward text at equal amplitude, both carriers on until the end. */
+function fullDuplexMix(fs: number): { x: Float32Array; fwdBytes: Uint8Array } {
+  const back = mustModulate(BACK_TEXT, { sampleRate: fs, channel: 'backward', tailIdleMs: 400 });
+  const fwdBytes = pn9Frames(230);
+  const fwd = mustModulate(fwdBytes, { sampleRate: fs, channel: 'forward', tailIdleMs: 600 });
+  const n = Math.min(back.length, fwd.length);
+  const x = new Float32Array(n);
+  for (let i = 0; i < n; i++) x[i] = fwd[i] + back[i];
+  return { x, fwdBytes };
+}
+
+describe('v23-modem task 14: backward channel', () => {
+  it('round trip: the backward demodulator decodes the backward modulator at the 8 standard rates, both modes', () => {
+    for (const fs of STANDARD_SAMPLE_RATES) {
+      const x = mustModulate(BACK_TEXT, { sampleRate: fs, channel: 'backward' });
+      for (const mode of ['fixed', 'adaptive'] as const) {
+        const events = demodChannel(x, fs, 'backward', mode);
+        expect(exactChars(events, BACK_TEXT), `fs=${fs} ${mode}`).toBe(true);
+        // No connect on the backward channel (the 2100 Hz answer tone is a forward signal).
+        expect(events.some((e) => e.type === 'connect')).toBe(false);
+      }
+    }
+  });
+
+  it('requirement 12.2: the backward low-pass passes 390-450 Hz, is -6 dB at 300 and 540 Hz, and rejects the forward channel by >= 50 dB', () => {
+    let worst = 0;
+    for (const fs of STANDARD_SAMPLE_RATES) {
+      const taps = designLowpass(fs, BACK.lowpassHz, DISCRIMINATOR.backward.transitionHz);
+      const db = (f: number): number => 20 * Math.log10(lowpassMagnitude(taps, fs, f - BACK.mixHz));
+      for (const f of [BACK.markHz, BACK.spaceHz]) expect(Math.abs(db(f)), `fs=${fs} ${f} Hz`).toBeLessThan(0.1);
+      for (const f of [300, 540]) expect(Math.abs(db(f) + 6.02), `fs=${fs} ${f} Hz`).toBeLessThan(0.1);
+      for (let f = 1100; f <= 2300; f += 10) {
+        expect(db(f), `fs=${fs} ${f} Hz`).toBeLessThanOrEqual(-50);
+        worst = Math.max(worst, db(f));
+      }
+    }
+    console.log(`backward low-pass: worst gain over the forward band 1100-2300 Hz ${worst.toFixed(1)} dB`);
+  });
+
+  it('M13 full duplex: forward and backward at equal amplitude are both decoded without error at 20 dB SNR', () => {
+    const rates = isSlowTestsEnabled() ? STANDARD_SAMPLE_RATES : ([8000, 16000, 48000] as const);
+    const seeds = isSlowTestsEnabled() ? 10 : 3;
+    for (const fs of rates) {
+      const { x, fwdBytes } = fullDuplexMix(fs);
+      for (let seed = 1; seed <= seeds; seed++) {
+        // gamma_3k = 20 dB relative to each signal (amplitude 0.5 each, A7 reference).
+        const y = mustApply(x, { sampleRate: fs, seed, noise: { kind: 'snr3k', db: 20 } });
+        for (const mode of ['fixed', 'adaptive'] as const) {
+          const tag = `fs=${fs} seed=${seed} ${mode}`;
+          expect(exactChars(demodChannel(y, fs, 'forward', mode), fwdBytes), `${tag} forward`).toBe(true);
+          expect(exactChars(demodChannel(y, fs, 'backward', mode), BACK_TEXT), `${tag} backward`).toBe(true);
+        }
+      }
+    }
+  });
+
+  it('backward quality: SNR estimate within 1 dB at 20 dB band SNR, and adaptive tracking of a 20 Hz offset', () => {
+    const fs = 16000;
+    const bn = noiseBandwidthHz(designLowpass(fs, BACK.lowpassHz, DISCRIMINATOR.backward.transitionHz), fs);
+    const x = mustModulate(pn9Frames(30), { sampleRate: fs, channel: 'backward' });
+    let sum = 0;
+    for (let seed = 1; seed <= 5; seed++) {
+      const y = mustApply(x, { sampleRate: fs, seed, channel: 'backward', noise: { kind: 'ebN0', db: 20 + 10 * Math.log10(bn / BACK.baud) } });
+      const q = qualityOf(demodChannel(y, fs, 'backward', 'adaptive')).filter((e) => e.atSample >= 1.2 * fs);
+      expect(q.length).toBeGreaterThan(5);
+      sum += q.reduce((s, e) => s + e.snrBandDb, 0) / q.length;
+    }
+    expect(Math.abs(sum / 5 - 20)).toBeLessThanOrEqual(1);
+    const off = mustApply(mustModulate(BACK_TEXT, { sampleRate: fs, channel: 'backward' }), { sampleRate: fs, seed: 9, offsetHz: 20, noise: { kind: 'snr3k', db: 20 }, channel: 'backward' });
+    const events = demodChannel(off, fs, 'backward', 'adaptive');
+    expect(exactChars(events, BACK_TEXT)).toBe(true);
+    const q = qualityOf(events);
+    expect(Math.abs(q[q.length - 1].offsetHz - 20)).toBeLessThanOrEqual(3);
   });
 });

@@ -95,6 +95,11 @@ export const QUALITY = {
    * low-pass, measured in task 10 on PN9 traffic: 1.0104 to 1.0108 at 8, 16, 44.1 and 48 kHz.
    */
   forwardEnvelopeKurtosis: 1.0105,
+  /**
+   * Same for the backward FSK (75 baud, h = 0.8), measured in task 14 on PN9 traffic: 1.00135 at
+   * 8, 16 and 48 kHz (the 120 Hz low-pass barely dips the envelope at 75 baud).
+   */
+  backwardEnvelopeKurtosis: 1.0014,
 } as const;
 
 /** One-sided reference band of γ_3k, the default SNR (docs/math.md D5). */
