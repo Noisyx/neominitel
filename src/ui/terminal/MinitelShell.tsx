@@ -4,6 +4,7 @@ import { CHANNELS } from '../../modem';
 export interface MinitelShellProps {
   online: boolean;
   statusLabel?: string;
+  chinControls?: ReactNode;
   children: ReactNode;
   footerSlot?: ReactNode;
 }
@@ -16,6 +17,7 @@ export interface MinitelShellProps {
 export function MinitelShell({
   online,
   statusLabel,
+  chinControls,
   children,
   footerSlot,
 }: MinitelShellProps): ReactElement {
@@ -34,42 +36,47 @@ export function MinitelShell({
         {/* Original SVG top brow with cooling louvres and bevelled industrial ridge */}
         <svg
           className="nm-shell-svg-decor"
-          viewBox="0 0 680 28"
+          viewBox="0 0 680 16"
           fill="none"
           xmlns="http://www.w3.org/2000/svg"
           aria-hidden="true"
         >
-          <rect x="0" y="2" width="680" height="22" rx="5" fill="#C9BDA4" />
-          <line x1="12" y1="5" x2="668" y2="5" stroke="#E5DEC9" strokeWidth="1.5" />
+          <rect x="0" y="1" width="680" height="14" rx="4" fill="#BFB49F" />
+          <line x1="12" y1="3" x2="668" y2="3" stroke="#D9D0BE" strokeWidth="1" />
           {Array.from({ length: 18 }, (_, i) => {
-            const x = 36 + i * 22;
+            const x = 32 + i * 22;
             return (
               <rect
                 key={x}
                 x={x}
-                y="9"
+                y="5"
                 width="12"
-                height="10"
-                rx="2"
-                fill="#8E816B"
+                height="6"
+                rx="1.5"
+                fill="#857A67"
               />
             );
           })}
-          <rect x="536" y="8" width="116" height="12" rx="2" fill="#B7AA90" />
+          <rect x="544" y="5" width="108" height="6" rx="1.5" fill="#ABA08B" />
         </svg>
 
         <div className="nm-shell-bezel">{children}</div>
 
         <div className="nm-shell-chin">
-          <span className="nm-shell-badge">NEOMINITEL · TERMINAL V.23</span>
-          <span className="nm-shell-pilot">
-            <span
-              className="nm-pilot-dot"
-              data-online={online ? 'true' : 'false'}
-              aria-hidden="true"
-            />
-            {label}
-          </span>
+          <div className="nm-shell-chin-left">
+            <span className="nm-shell-badge">NeoMinitel</span>
+            <span className="nm-shell-pilot">
+              <span
+                className="nm-pilot-dot"
+                data-online={online ? 'true' : 'false'}
+                aria-hidden="true"
+              />
+              {label}
+            </span>
+          </div>
+          {chinControls && (
+            <div className="nm-shell-chin-controls">{chinControls}</div>
+          )}
         </div>
 
         {footerSlot}

@@ -961,6 +961,15 @@ export function App(): ReactElement {
           >
             Tube cathodique
           </button>
+
+          <button
+            type="button"
+            className="nm-btn"
+            aria-pressed={state.hudVisible}
+            onClick={handleToggleHudVisible}
+          >
+            {state.hudVisible ? 'Fermer le capot' : 'Sous le capot'}
+          </button>
         </div>
       </header>
 
@@ -993,6 +1002,46 @@ export function App(): ReactElement {
           <MinitelShell
             online={state.session === 'online'}
             statusLabel={statusLabel}
+            chinControls={
+              <div
+                className="nm-chin-switches"
+                role="group"
+                aria-label="Aides de réception du terminal"
+              >
+                <button
+                  type="button"
+                  className="nm-chin-switch"
+                  aria-pressed={state.threshold === 'adaptive'}
+                  title="Recale automatiquement la radio si l’émetteur est déréglé"
+                  onClick={handleToggleThreshold}
+                >
+                  <span
+                    className="nm-chin-dot"
+                    data-active={state.threshold === 'adaptive' ? 'true' : 'false'}
+                    aria-hidden="true"
+                  />
+                  <span>Accord auto</span>
+                </button>
+                <button
+                  type="button"
+                  className="nm-chin-switch"
+                  aria-pressed={state.voteOn}
+                  title="Répare la page en combinant plusieurs écoutes (touche Répétition)"
+                  onClick={handleToggleVote}
+                >
+                  <span
+                    className="nm-chin-dot"
+                    data-active={state.voteOn ? 'true' : 'false'}
+                    aria-hidden="true"
+                  />
+                  <span>
+                    {(getActiveVoteSummary(state.votes)?.receptions ?? 0) >= 2
+                      ? `Vote (${getActiveVoteSummary(state.votes)?.receptions}×)`
+                      : 'Vote'}
+                  </span>
+                </button>
+              </div>
+            }
             footerSlot={
               <div className="nm-terminal-controls">
                 {state.mode === 'Serveur' && state.session !== 'start' && (
@@ -1064,7 +1113,6 @@ export function App(): ReactElement {
                       value={state.router.inputBuffer}
                       onChangeText={handleSetInputText}
                       onSubmitEnvoi={() => handleFunctionKey('Envoi')}
-                      onClearAnnulation={() => handleFunctionKey('Annulation')}
                     />
                   )}
 
@@ -1072,16 +1120,6 @@ export function App(): ReactElement {
                   <FunctionKeys
                     online={state.session !== 'start'}
                     onPressKey={handleFunctionKey}
-                  />
-                )}
-
-                {state.mode === 'Seul' && (
-                  <SimControls
-                    sim={state.sim}
-                    canReplay={state.session !== 'start' && state.router !== null}
-                    disabled={state.router?.lastOutput.playWav !== undefined}
-                    onChangeSim={handleChangeSim}
-                    onReplaySeeded={handleReplaySeeded}
                   />
                 )}
 
@@ -1157,35 +1195,48 @@ export function App(): ReactElement {
             </div>
           </MinitelShell>
 
-          <MathHud
-            visible={state.hudVisible}
-            onToggleVisible={handleToggleHudVisible}
-            thresholdMode={state.threshold}
-            onToggleThreshold={handleToggleThreshold}
-            voteOn={state.voteOn}
-            onToggleVote={handleToggleVote}
-            bufferRef={hudBufferRef}
-            quality={state.quality}
-            cps={state.cps}
-            parityErrors={state.errors.parity}
-            framingErrors={state.errors.framing}
-            voteSummary={getActiveVoteSummary(state.votes)}
-            berPoints={state.berPoints}
-            onClearBerPoints={handleClearBerPoints}
-            showBerChart={state.router?.activeServiceId === 'MATHS'}
-            voteProgression={getActiveVoteProgression(state.votes)}
-            showVoteCerPanel={
-              state.router?.lastOutput.pageId === 'maths/vote' ||
-              (getActiveVoteSummary(state.votes)?.receptions ?? 0) >= 2
-            }
-            canAutoRepeatVote={
-              state.mode === 'Seul' &&
-              state.session !== 'start' &&
-              state.router !== null
-            }
-            autoRepeatingVote={state.autoRepeatTarget > 0}
-            onRunSevenReceptions={handleRunSevenReceptions}
-          />
+          {state.hudVisible && (
+            <MathHud
+              visible={state.hudVisible}
+              onToggleVisible={handleToggleHudVisible}
+              thresholdMode={state.threshold}
+              onToggleThreshold={handleToggleThreshold}
+              voteOn={state.voteOn}
+              onToggleVote={handleToggleVote}
+              bufferRef={hudBufferRef}
+              quality={state.quality}
+              cps={state.cps}
+              parityErrors={state.errors.parity}
+              framingErrors={state.errors.framing}
+              voteSummary={getActiveVoteSummary(state.votes)}
+              berPoints={state.berPoints}
+              onClearBerPoints={handleClearBerPoints}
+              showBerChart={state.router?.activeServiceId === 'MATHS'}
+              voteProgression={getActiveVoteProgression(state.votes)}
+              showVoteCerPanel={
+                state.router?.lastOutput.pageId === 'maths/vote' ||
+                (getActiveVoteSummary(state.votes)?.receptions ?? 0) >= 2
+              }
+              canAutoRepeatVote={
+                state.mode === 'Seul' &&
+                state.session !== 'start' &&
+                state.router !== null
+              }
+              autoRepeatingVote={state.autoRepeatTarget > 0}
+              onRunSevenReceptions={handleRunSevenReceptions}
+              simSlot={
+                state.mode === 'Seul' ? (
+                  <SimControls
+                    sim={state.sim}
+                    canReplay={state.session !== 'start' && state.router !== null}
+                    disabled={state.router?.lastOutput.playWav !== undefined}
+                    onChangeSim={handleChangeSim}
+                    onReplaySeeded={handleReplaySeeded}
+                  />
+                ) : undefined
+              }
+            />
+          )}
         </div>
       </main>
     </div>

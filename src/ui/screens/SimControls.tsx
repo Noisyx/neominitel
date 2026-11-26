@@ -88,7 +88,7 @@ export function SimControls({
             </label>
             <div className="nm-sim-readout-group">
               <span className="nm-sim-value">
-                {isCleanNoise ? 'Propre (sans bruit)' : `${sim.ebN0Db?.toFixed(1)} dB`}
+                {isCleanNoise ? 'Propre' : `${sim.ebN0Db?.toFixed(1)} dB`}
               </span>
               <button
                 type="button"
