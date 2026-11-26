@@ -419,3 +419,55 @@ formulas predict (A4: 3 % of damaged cells per reception, 0.01 % after 5 recepti
 
 Framing errors are counted as erasures too: the app flags a cell as damaged when parity or stop
 bit is wrong (`src/workers/line-engine.ts`), which matches the erasure model.
+
+---
+
+## 8. Correlator receiver and curve 4 (task 15)
+
+**What it is.** A second receiver, `createCorrelatorDemodulator` (`src/modem/correlator.ts`,
+design.md "Correlator demodulator"). For each tone it correlates the raw input with e^{−j2πft}
+over one bit (N = round(fs/1200) samples) and compares the energies:
+d = |z_mark|² − |z_space|². This is the per-bit envelope detector that curve 2 describes. It has its
+own frame timing: a start edge is the zero crossing of d, and each bit is read at its centre. It is
+a test-bench receiver (no carrier detection, no threshold), not a replacement for the app's
+demodulator.
+
+**Curve 4** is its Monte Carlo curve: same chain, grid, seeds and counter as curve 3
+(`npx tsx scripts/montecarlo-ber.ts --receiver correlator`, `public/data/ber-curve4.json`).
+
+| Eb/N0 | Curve 2 | Curve 3 (discriminator) | Curve 4 (correlator) | Correlator, exact timing, raw bits |
+|---|---|---|---|---|
+| 8 dB | 3.9·10⁻² | 3.7·10⁻¹ | 2.5·10⁻¹ | |
+| 10 dB | 1.1·10⁻² | 1.6·10⁻¹ | 7.8·10⁻² | 1.4·10⁻² |
+| 12 dB | 1.6·10⁻³ | 3.2·10⁻² | 1.6·10⁻² | 3.4·10⁻³ |
+| 14 dB | 8.3·10⁻⁵ | 3.2·10⁻³ | 1.8·10⁻³ | 4.7·10⁻⁴ |
+| 15 dB | | 5.9·10⁻⁴ | 6.0·10⁻⁴ | |
+| 16 dB | 9.0·10⁻⁷ | 9.8·10⁻⁵ | 1.8·10⁻⁴ | 6.7·10⁻⁵ (2 errors) |
+| 17 dB | | 0 | 5.4·10⁻⁵ | |
+
+The last column is a separate measurement (task 15 probe, 16 kHz, seed 1, 30 000 line bits): the
+correlator with the exact bit boundaries of the modulator, raw bit errors, no counter.
+
+Reading:
+
+- **Below 15 dB the correlator wins** (half the counted BER from 8 to 12 dB). The counted BER is
+  dominated by framing slips there (section 6.3), and the correlator loses fewer frames than the
+  discriminator's UART. At 10⁻³ the gain is small: 14.5 dB against 14.7 dB (log-linear
+  interpolation between 1 dB points).
+- **From 16 dB the discriminator wins** and reaches 0 counted errors at 17 dB, where the correlator
+  still makes isolated bit errors. Its timing comes from one noisy zero crossing per frame, and the
+  crossing is biased by the tone phases. Measured spread of the edge against the frame grid, 1st to
+  99th percentile over 2 000 frames: about −0.1 T to +0.125 T on a clean signal (8, 16 and
+  48 kHz), −0.2 T to +0.28 T at 16 dB. Two better-looking timing schemes were tried and were worse at every Eb/N0 (design.md
+  "Correlator demodulator").
+- **Even with exact timing, the correlator stays above curve 2** (1.4·10⁻² against 1.1·10⁻² at
+  10 dB, 4.7·10⁻⁴ against 8.3·10⁻⁵ at 14 dB). Hypothesis, two causes: (1) the line signal is
+  continuous-phase FSK, and a one-bit detector ignores the phase memory from bit to bit, which the
+  discriminator partly uses (its phase difference spans bit boundaries); (2) the signal is real, so
+  each correlator also sees the image terms at f_mark + f and f_space + f (relative size
+  |sinc(2fT)| ≈ 0.07 and |sinc((f_m + f_s)T)| ≈ 0.06), which curve 2 (complex baseband) does not
+  include. Not yet separated by measurement.
+
+**For the 3615 MATHS chart** (Role A, display): curve 4 has the same format and the same Eb/N0 grid
+as curve 3, so it can be drawn as a second band next to curve 3. Suggested caption: « Corrélateurs :
+meilleurs sous 15 dB, moins bons au-dessus ».

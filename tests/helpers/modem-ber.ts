@@ -1,7 +1,7 @@
-// Full-chain BER measurement shared by the M6 test, scripts/calibrate-modem.ts and
+// Full-chain BER measurement shared by the M6 and M15 tests, scripts/calibrate-modem.ts and
 // scripts/montecarlo-ber.ts: PN9 frames -> modulate -> applyChannel (AWGN at Eb/N0, A7) ->
-// streaming demodulator -> BerCounter (design.md "PN9 and BER"). Deterministic for a given seed.
-import { BerCounter, applyChannel, createDemodulator, modulate, pn9Frames, type BerSnapshot } from '../../src/modem';
+// streaming demodulator or correlator receiver -> BerCounter (design.md "PN9 and BER"). Deterministic for a given seed.
+import { BerCounter, applyChannel, createCorrelatorDemodulator, createDemodulator, modulate, pn9Frames, type BerSnapshot } from '../../src/modem';
 
 export interface ChainBerOptions {
   sampleRate: number;
@@ -9,6 +9,8 @@ export interface ChainBerOptions {
   seed: number;
   frames: number;
   threshold?: 'fixed' | 'adaptive';
+  /** Default 'discriminator' (the app receiver); 'correlator' is the task 15 receiver (curve 4). */
+  receiver?: 'discriminator' | 'correlator';
 }
 
 const cleanCache = new Map<string, Float32Array>();
@@ -33,6 +35,13 @@ export function chainBer(o: ChainBerOptions): BerSnapshot {
     noise: { kind: 'ebN0', db: o.ebN0Db },
   });
   if (!y.ok) throw new Error(`applyChannel: ${JSON.stringify(y.error)}`);
+  if (o.receiver === 'correlator') {
+    const c = createCorrelatorDemodulator({ sampleRate: o.sampleRate });
+    if (!c.ok) throw new Error(`createCorrelatorDemodulator: ${JSON.stringify(c.error)}`);
+    const counter = new BerCounter();
+    for (const ch of [...c.value.push(y.value), ...c.value.flush()]) counter.pushFrame(ch.value, ch.framingOk);
+    return counter.snapshot();
+  }
   const d = createDemodulator({ sampleRate: o.sampleRate, threshold: o.threshold });
   if (!d.ok) throw new Error(`createDemodulator: ${JSON.stringify(d.error)}`);
   const counter = new BerCounter();
