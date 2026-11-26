@@ -1,10 +1,64 @@
-import type { ReactElement } from 'react';
+import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import {
   berNoncoherentCorrelated,
   berOrthogonalNoncoherent,
   FORWARD_RHO,
 } from '../../modem';
-import curve3Json from '../../../public/data/ber-curve3.json';
+
+export interface Curve3Dataset {
+  readonly ebN0Db: readonly number[];
+  readonly ber: readonly number[];
+  readonly lo: readonly number[];
+  readonly hi: readonly number[];
+}
+
+/**
+ * Baseline snapshot of `public/data/ber-curve3.json` for immediate synchronous first paint & SSR;
+ * refreshed over HTTP from `/data/ber-curve3.json` on mount in the browser so Vite never imports `public/`.
+ */
+const DEFAULT_CURVE3_DATA: Curve3Dataset = {
+  ebN0Db: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+  ber: [
+    0.7033325810576996, 0.6934978711120733, 0.6812535106396875,
+    0.6617030401219861, 0.636789887078175, 0.6000168339147268,
+    0.5492316497108543, 0.4806386123094836, 0.3734264735478761,
+    0.2636399499168139, 0.15798203675840006, 0.0764561311412823,
+    0.03225850845684874, 0.011593784793750535, 0.003200737736474085,
+    0.0005851061454011104, 0.00009823007269025379, 0, 0,
+  ],
+  lo: [
+    0.699848149094832, 0.6900542057832881, 0.6779434361165618,
+    0.6584950279531079, 0.6336752112540038, 0.597076893019165,
+    0.5463797869099867, 0.4779638380195398, 0.37101398744789094,
+    0.2615802492018489, 0.156368830393676, 0.0753261153780937,
+    0.0315249909621531, 0.011156700864665185, 0.0029748895704565744,
+    0.0004931423682016601, 0.0000648731872186558, 0, 0,
+  ],
+  hi: [
+    0.7067935096037905, 0.6969200801311699, 0.6845453946661334,
+    0.6648962526632124, 0.6398931299468016, 0.6029495883959032,
+    0.5520802815607524, 0.4833144968798367, 0.37584527300581083,
+    0.2657100329543127, 0.15960873733090733, 0.07760167632581425,
+    0.03300851159117111, 0.012047783647590321, 0.003443672660172628,
+    0.0006942078990052106, 0.00014873605086760346, 0.000017151237216747512,
+    0.000017151237216747512,
+  ],
+};
+
+function isValidCurve3Dataset(val: unknown): val is Curve3Dataset {
+  if (!val || typeof val !== 'object') return false;
+  const c = val as Record<string, unknown>;
+  return (
+    Array.isArray(c.ebN0Db) &&
+    Array.isArray(c.ber) &&
+    Array.isArray(c.lo) &&
+    Array.isArray(c.hi) &&
+    c.ebN0Db.length > 0 &&
+    c.ber.length === c.ebN0Db.length &&
+    c.lo.length === c.ebN0Db.length &&
+    c.hi.length === c.ebN0Db.length
+  );
+}
 
 export interface BerPoint {
   readonly ebN0Db: number;
@@ -51,7 +105,7 @@ interface StaticCurvesGeometry {
   curve3BandPolygon: string;
 }
 
-const STATIC_GEOMETRY: StaticCurvesGeometry = (() => {
+function buildCurvesGeometry(curve3: Curve3Dataset): StaticCurvesGeometry {
   const c1: string[] = [];
   const c2: string[] = [];
   for (let step = 0; step <= 36; step++) {
@@ -66,13 +120,13 @@ const STATIC_GEOMETRY: StaticCurvesGeometry = (() => {
   const c3: string[] = [];
   const upperPts: string[] = [];
   const lowerPts: string[] = [];
-  const n = curve3Json.ebN0Db.length;
+  const n = curve3.ebN0Db.length;
   for (let i = 0; i < n; i++) {
-    const db = curve3Json.ebN0Db[i];
+    const db = curve3.ebN0Db[i];
     const x = dbToX(db).toFixed(1);
-    const yMean = berToY(curve3Json.ber[i]).toFixed(1);
-    const yHi = berToY(curve3Json.hi[i]).toFixed(1);
-    const yLo = berToY(curve3Json.lo[i]).toFixed(1);
+    const yMean = berToY(curve3.ber[i]).toFixed(1);
+    const yHi = berToY(curve3.hi[i]).toFixed(1);
+    const yLo = berToY(curve3.lo[i]).toFixed(1);
     c3.push(`${i === 0 ? 'M' : 'L'}${x},${yMean}`);
     upperPts.push(`${x},${yHi}`);
     lowerPts.unshift(`${x},${yLo}`);
@@ -84,7 +138,7 @@ const STATIC_GEOMETRY: StaticCurvesGeometry = (() => {
     curve3Path: c3.join(' '),
     curve3BandPolygon: [...upperPts, ...lowerPts].join(' '),
   };
-})();
+}
 
 function formatSciBer(ber: number): string {
   if (ber <= 0) return '0';
@@ -98,6 +152,35 @@ function formatSciBer(ber: number): string {
  * (Requirements 6.2, 6.3, 8.4).
  */
 export function BerChart({ points, onClearPoints }: BerChartProps): ReactElement {
+  const [curve3Data, setCurve3Data] = useState<Curve3Dataset>(DEFAULT_CURVE3_DATA);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof fetch !== 'function') {
+      return;
+    }
+    let cancelled = false;
+    const base =
+      (import.meta as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? '/';
+    const prefix = base.endsWith('/') ? base : `${base}/`;
+    void fetch(`${prefix}data/ber-curve3.json`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json: unknown) => {
+        if (!cancelled && isValidCurve3Dataset(json)) {
+          setCurve3Data(json);
+        }
+      })
+      .catch(() => {
+        // Keep embedded baseline Curve 3 data if offline or unreachable
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const geometry = useMemo(
+    () => buildCurvesGeometry(curve3Data),
+    [curve3Data],
+  );
   const latest = points.length > 0 ? points[points.length - 1] : null;
   const srSummary = latest
     ? `Courbes BER V.23 : ${points.length} point(s) mesuré(s). Dernier point à Eb/N0 ${latest.ebN0Db.toFixed(1)} dB : BER ${formatSciBer(latest.ber)} (intervalle Wilson 95 % de ${formatSciBer(latest.lo)} à ${formatSciBer(latest.hi)} sur ${latest.bits} bits).`
@@ -202,13 +285,13 @@ export function BerChart({ points, onClearPoints }: BerChartProps): ReactElement
 
         {/* Curve 3 95% Wilson Monte Carlo band */}
         <polygon
-          points={STATIC_GEOMETRY.curve3BandPolygon}
+          points={geometry.curve3BandPolygon}
           fill="rgba(229, 184, 75, 0.18)"
         />
 
         {/* Curve 1: Orthogonal non-coherent BFSK */}
         <path
-          d={STATIC_GEOMETRY.curve1Path}
+          d={geometry.curve1Path}
           fill="none"
           stroke="#6fd977"
           strokeWidth="1.3"
@@ -217,7 +300,7 @@ export function BerChart({ points, onClearPoints }: BerChartProps): ReactElement
 
         {/* Curve 2: Correlated non-coherent BFSK (Marcum Q1, h = 2/3) */}
         <path
-          d={STATIC_GEOMETRY.curve2Path}
+          d={geometry.curve2Path}
           fill="none"
           stroke="#64d2ff"
           strokeWidth="1.4"
@@ -225,7 +308,7 @@ export function BerChart({ points, onClearPoints }: BerChartProps): ReactElement
 
         {/* Curve 3: Our discriminator + 7E1 UART chain (Monte Carlo) */}
         <path
-          d={STATIC_GEOMETRY.curve3Path}
+          d={geometry.curve3Path}
           fill="none"
           stroke="#e5b84b"
           strokeWidth="1.6"

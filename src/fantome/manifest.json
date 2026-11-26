@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "salt": "3615fantome20120630velizyptt0001",
+  "levels": [
+    {
+      "id": "L1",
+      "title": "Premier contact",
+      "hint": "Aucune anomalie radio sur cette première veille : laissez la page s'afficher jusqu'au bout et relevez la clef inscrite sur le bandeau cyan.",
+      "storyPage": "fantome/story-l1",
+      "wav": "transmissions/L1.wav",
+      "feature": "none",
+      "codeHash": "60fa09872d17b16dbb95dff6af379147eb2cb41530267fd0f6f74f16bf68d328",
+      "seedUsed": 1001
+    },
+    {
+      "id": "L2",
+      "title": "Parasites",
+      "hint": "Le bit de parité 7E1 signale les octets endommagés par des blocs hachurés sans décaler le reste de la page : lisez directement le bandeau vert resté intact.",
+      "storyPage": "fantome/story-l2",
+      "wav": "transmissions/L2.wav",
+      "feature": "parity",
+      "codeHash": "14f7b8c23c874cbedcf8a7732580809ec5f33919c3e05fb715d4a123637889bf",
+      "seedUsed": 2003
+    },
+    {
+      "id": "L3",
+      "title": "La radio mal accordée",
+      "hint": "L'émetteur dérive de +380 Hz : activez le bouton « Accord automatique » dans le panneau Math HUD puis relancez l'écoute pour recaler le seuil de décision.",
+      "storyPage": "fantome/story-l3",
+      "wav": "transmissions/L3.wav",
+      "feature": "adaptive",
+      "codeHash": "b5931e330bc7f3a45c1a234d53e212e8a06ced97151cc5b8305d8dbad0248cd4",
+      "seedUsed": 3001
+    },
+    {
+      "id": "L4",
+      "title": "Le murmure",
+      "hint": "Une écoute isolée est noyée dans le souffle, mais la bande répète la page 7 fois : laissez le bouton « Vote » activé dans le Math HUD jusqu'à la fin des 7 passages.",
+      "storyPage": "fantome/story-l4",
+      "wav": "transmissions/L4.wav",
+      "feature": "vote",
+      "codeHash": "bfb10c4e3498c8268bca365c9c6cec3ac63268054d6ea87c5d1d30978f99d894",
+      "seedUsed": 4025
+    }
+  ]
+}

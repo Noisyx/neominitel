@@ -1074,9 +1074,138 @@ body {
   border: 0;
 }
 
+.nm-skip-link {
+  position: absolute;
+  left: 16px;
+  top: -120px;
+  z-index: 100;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background-color: var(--nm-focus-ring);
+  color: #141210;
+  font-family: var(--nm-font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.nm-skip-link:focus,
+.nm-skip-link:focus-visible {
+  top: 12px;
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
+.nm-shell:focus {
+  outline: none;
+}
+
+.nm-filedrop-overlay[data-drag-active='true'] {
+  border: 2px dashed var(--nm-focus-ring);
+  background-color: rgba(24, 22, 16, 0.94);
+}
+
+.nm-filedrop-error {
+  max-width: 480px;
+}
+
+.nm-filedrop-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--nm-text-primary);
+  cursor: pointer;
+}
+
+.nm-filedrop-mode-toggle input:focus-visible,
+.nm-file-inline-check input:focus-visible {
+  outline: 2px solid var(--nm-focus-ring);
+  outline-offset: 2px;
+}
+
+.nm-file-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  background-color: var(--nm-bezel-dark);
+  border: 1px solid var(--nm-bezel-inner);
+  border-radius: 10px;
+}
+
+.nm-file-panel-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.nm-file-inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--nm-text-secondary);
+  cursor: pointer;
+}
+
+.nm-file-progress-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.nm-file-progress {
+  flex: 1;
+  height: 10px;
+  accent-color: var(--nm-led-online);
+}
+
+.nm-file-progress-pct {
+  font-family: var(--nm-font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--nm-text-primary);
+  min-width: 42px;
+  text-align: right;
+}
+
+.nm-file-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+@keyframes nm-crt-flicker {
+  0%,
+  100% {
+    opacity: 0.96;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.nm-crt-overlay {
+  animation: nm-crt-flicker 4s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .nm-btn {
-    transition: none;
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .nm-crt-overlay {
+    display: none;
   }
 }
 

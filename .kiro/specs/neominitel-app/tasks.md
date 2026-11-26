@@ -60,7 +60,7 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Depends o
   - [x] 11.3 "Vote" page: measured cell error rate after 1/3/5/7 receptions vs formulas.
   - _Requirements: 6.1-6.4_
 
-- [ ] 12. File mode `[MVP]`
+- [x] 12. File mode `[MVP]`
   - Drop or select a WAV, fast decode with progress, optional real-time playback, French error messages.
   - _Requirements: 2.4, 10.4_
 
@@ -68,11 +68,11 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Depends o
   - Sliders and toggles, seeded replay.
   - _Requirements: 3.1-3.3_
 
-- [ ] 14. Accessibility and polish `[MVP]`
+- [x] 14. Accessibility and polish `[MVP]`
   - Keyboard-only path, visible focus, reduced motion, aria-live screen summary, CRT overlay, property test A7.
   - _Requirements: 9.2-9.4_
 
-- [ ] 15. Deployment `[MVP]`
+- [x] 15. Deployment `[MVP]`
   - Static build, HTTPS host, bundle size check, manual checklist on two devices and every browser.
   - _Requirements: 13.2-13.3_
 

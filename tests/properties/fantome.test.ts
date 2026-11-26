@@ -45,7 +45,7 @@ import {
   lintPages,
   type ServiceInput,
 } from '../../src/services';
-import { createInitialUiState, uiReducer } from '../../src/ui/App';
+import { createInitialUiState, uiReducer } from '../../src/ui/app-state';
 import {
   decodePageSourceToScreen,
   STANDBY_PAGE_SOURCE,

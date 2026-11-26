@@ -1,4 +1,4 @@
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createElement } from 'react';
@@ -34,12 +34,19 @@ import {
   type ServiceId,
   type ServiceInput,
 } from '../../src/services';
+import { App } from '../../src/ui/App';
 import {
-  App,
   applyTimedEventsToScreen,
   createInitialUiState,
+  executeModeSwitch,
   uiReducer,
-} from '../../src/ui/App';
+  type UiAction,
+} from '../../src/ui/app-state';
+import {
+  formatModemErrorFr,
+  formatPageErrorFr,
+  formatWavErrorReasonFr,
+} from '../../src/ui/errors';
 import {
   classifyCaptureError,
   evaluateRawAudioSettings,
@@ -50,6 +57,20 @@ import {
   resampleBlockForPlayback,
   type AudioContextConstructor,
 } from '../../src/audio/playback';
+import {
+  modulate,
+  WAV_ERROR_REASONS,
+  writeWav,
+} from '../../src/modem';
+import {
+  FileDrop,
+  FileModeBar,
+  INITIAL_FILE_MODE_STATE,
+} from '../../src/ui/screens/FileDrop';
+import {
+  checkBundleSize,
+  MAX_GZIPPED_JS_BYTES,
+} from '../../scripts/check-bundle-size';
 import { MicPermission } from '../../src/ui/screens/MicPermission';
 import { LINE_MODE_OPTIONS } from '../../src/ui/screens/ModeBar';
 import { SimControls } from '../../src/ui/screens/SimControls';
@@ -1402,6 +1423,374 @@ describe('neominitel-app Property Tests', () => {
     expect(report.issues).toEqual([]);
     expect(report.ok).toBe(true);
     expect(report.maxSimilarity).toBeLessThan(MAX_PAIRWISE_PAGE_SIMILARITY);
+  });
+
+  it('A7 reducer: shown always has 25x40 cells; switching mode never leaves a capture or a transmission running', () => {
+    const standby = decodePageSourceToScreen(STANDBY_PAGE_SOURCE);
+    const { state: sampleRouter } = connectRouter();
+    const encodedSommaire = encodePage(SOMMAIRE_PREVIEW_PAGE_SOURCE);
+    expect(encodedSommaire.ok).toBe(true);
+    const sampleBytes = encodedSommaire.ok
+      ? encodedSommaire.value.bytes
+      : new Uint8Array([0x0c]);
+
+    type HarnessStep =
+      | { kind: 'switchMode'; mode: (typeof LINE_MODE_OPTIONS)[number]['id'] }
+      | { kind: 'startCapture' }
+      | { kind: 'startTransmit' }
+      | { kind: 'startFile'; realtime: boolean }
+      | { kind: 'action'; action: UiAction };
+
+    const arbMalformedScreen = fc
+      .array(
+        fc.array(fc.constant(createBlankCell({ code: 0x58 })), {
+          minLength: 0,
+          maxLength: 45,
+        }),
+        { minLength: 0, maxLength: 30 },
+      )
+      .map((rows) => ({
+        rows,
+        cursor: { row: 99, col: -5, visible: true },
+        attrs: createBlankScreen().attrs,
+      }));
+
+    const arbDiffEvent: fc.Arbitrary<TimedEvent> = fc
+      .array(
+        fc.tuple(
+          fc.integer({ min: -5, max: 30 }),
+          fc.integer({ min: -5, max: 45 }),
+          fc.constant(createBlankCell({ code: 0x4d })),
+        ),
+        { minLength: 0, maxLength: 10 },
+      )
+      .map((cells) => ({ atSample: 100, e: 'diff' as const, cells }));
+
+    const arbAction: fc.Arbitrary<UiAction> = fc.oneof(
+      fc.constant<UiAction>({
+        type: 'BEGIN_SESSION',
+        router: sampleRouter,
+        unmuteSpeaker: true,
+      }),
+      fc.constant<UiAction>({
+        type: 'UPDATE_ROUTER_FOR_TRANSMIT',
+        router: sampleRouter,
+      }),
+      fc.constant<UiAction>({ type: 'UPDATE_LOCAL_ECHO', router: sampleRouter }),
+      fc.constant<UiAction>({ type: 'DISCONNECT', standby }),
+      fc.constant<UiAction>({ type: 'MIC_ASKING' }),
+      fc.constant<UiAction>({
+        type: 'MIC_STARTED',
+        rawOk: true,
+        rawAudioWarning: null,
+      }),
+      fc.constant<UiAction>({ type: 'MIC_DENIED', message: 'Refusé' }),
+      fc.constant<UiAction>({ type: 'SHOW_NO_CARRIER_HINT' }),
+      fc.constant<UiAction>({ type: 'TOGGLE_MUTE' }),
+      fc.constant<UiAction>({ type: 'TOGGLE_PALETTE' }),
+      fc.constant<UiAction>({ type: 'TOGGLE_CRT' }),
+      fc.constant<UiAction>({ type: 'TOGGLE_HUD_VISIBLE' }),
+      fc.constant<UiAction>({ type: 'TOGGLE_THRESHOLD' }),
+      fc.constant<UiAction>({ type: 'TOGGLE_VOTE' }),
+      fc.constant<UiAction>({ type: 'CLEAR_BER_POINTS' }),
+      fc.constant<UiAction>({ type: 'START_AUTO_REPEAT', target: 5 }),
+      fc.constant<UiAction>({
+        type: 'FILE_PROGRESS',
+        done: 50,
+        total: 100,
+      }),
+      fc.constant<UiAction>({ type: 'FILE_REALTIME_ENDED' }),
+      fc.constant<UiAction>({
+        type: 'FILE_ERROR',
+        fileName: 'bad.wav',
+        message: 'Erreur WAV',
+      }),
+      arbDiffEvent.map(
+        (ev): UiAction => ({ type: 'APPLY_TIMED_EVENTS', events: [ev] }),
+      ),
+      arbMalformedScreen.map(
+        (scr): UiAction => ({
+          type: 'APPLY_TIMED_EVENTS',
+          events: [{ atSample: 500, e: 'pageEnd', screen: scr }],
+        }),
+      ),
+      arbMalformedScreen.map(
+        (scr): UiAction => ({
+          type: 'FILE_FAST_COMPLETE',
+          events: [{ atSample: 500, e: 'pageEnd', screen: scr }],
+        }),
+      ),
+    );
+
+    const arbStep: fc.Arbitrary<HarnessStep> = fc.oneof(
+      fc
+        .constantFrom(...LINE_MODE_OPTIONS.map((o) => o.id))
+        .map((mode): HarnessStep => ({ kind: 'switchMode', mode })),
+      fc.constant<HarnessStep>({ kind: 'startCapture' }),
+      fc.constant<HarnessStep>({ kind: 'startTransmit' }),
+      fc
+        .boolean()
+        .map((realtime): HarnessStep => ({ kind: 'startFile', realtime })),
+      arbAction.map((action): HarnessStep => ({ kind: 'action', action })),
+    );
+
+    const engine = createLineEngine();
+    expect(engine.init(16000)).toBeNull();
+
+    fc.assert(
+      fc.property(
+        fc.array(arbStep, { minLength: 1, maxLength: 35 }),
+        (steps) => {
+          engine.reset();
+          expect(engine.init(16000)).toBeNull();
+          let state = createInitialUiState(standby);
+          let captureRunning = false;
+          let playerPlaying = false;
+          let scheduledEvents = 0;
+
+          for (const step of steps) {
+            if (step.kind === 'switchMode') {
+              state = executeModeSwitch(state, step.mode, standby, {
+                stopCapture: () => {
+                  captureRunning = false;
+                },
+                stopTransmit: () => {
+                  engine.stopTransmit();
+                },
+                stopPlayer: () => {
+                  playerPlaying = false;
+                },
+                clearScheduler: () => {
+                  scheduledEvents = 0;
+                },
+                resetWorker: () => {
+                  engine.reset();
+                  engine.init(16000);
+                },
+              });
+
+              // Mode switch invariant: never leaves a capture or a transmission running
+              expect(captureRunning).toBe(false);
+              expect(engine.hasActiveTransmit()).toBe(false);
+              expect(playerPlaying).toBe(false);
+              expect(scheduledEvents).toBe(0);
+              expect(state.micState).toBe('off');
+              expect(state.carrierOn).toBe(false);
+              expect(state.autoRepeatTarget).toBe(0);
+              expect(state.file.status).toBe('idle');
+            } else if (step.kind === 'startCapture') {
+              if (state.mode === 'Ecoute') {
+                captureRunning = true;
+                state = uiReducer(state, {
+                  type: 'MIC_STARTED',
+                  rawOk: true,
+                  rawAudioWarning: null,
+                });
+              }
+            } else if (step.kind === 'startTransmit') {
+              if (state.mode === 'Seul' || state.mode === 'Serveur') {
+                engine.startTransmit({
+                  id: 1,
+                  bytes: sampleBytes,
+                  pageId: 'sommaire/accueil',
+                  simulate: state.mode === 'Seul',
+                });
+                playerPlaying = true;
+                scheduledEvents = 3;
+                state = uiReducer(state, {
+                  type: 'BEGIN_SESSION',
+                  router: sampleRouter,
+                });
+              }
+            } else if (step.kind === 'startFile') {
+              if (state.mode === 'Fichier') {
+                playerPlaying = step.realtime;
+                state = uiReducer(state, {
+                  type: 'FILE_START',
+                  fileName: 'sample.wav',
+                  realtime: step.realtime,
+                });
+              }
+            } else {
+              state = uiReducer(state, step.action);
+            }
+
+            // Screen dimension invariant: shown ALWAYS has 25 x 40 cells
+            expect(state.shown.rows.length).toBe(SCREEN_ROWS);
+            for (let r = 0; r < SCREEN_ROWS; r++) {
+              expect(state.shown.rows[r].length).toBe(SCREEN_COLS);
+            }
+          }
+        },
+      ),
+      { numRuns: runs(120, 400) },
+    );
+  });
+});
+
+describe('neominitel-app Task 12, 14 & 15: Fichier mode, French errors, Accessibility & Bundle budget', () => {
+  it('maps every ModemError, WavErrorReason, and PageError to a clear French message', () => {
+    for (const reason of WAV_ERROR_REASONS) {
+      const msg = formatWavErrorReasonFr(reason);
+      expect(msg.length).toBeGreaterThan(15);
+      expect(msg).not.toContain('undefined');
+      expect(formatModemErrorFr({ kind: 'wav', reason })).toBe(msg);
+    }
+
+    expect(formatModemErrorFr({ kind: 'bad-sample-rate', sampleRate: 4000 })).toContain(
+      '4000 Hz',
+    );
+    expect(
+      formatModemErrorFr({ kind: 'byte-out-of-range', index: 3, value: 200 }),
+    ).toContain('200');
+    expect(
+      formatModemErrorFr({
+        kind: 'bad-option',
+        option: 'amplitude',
+        reason: 'out of range',
+      }),
+    ).toContain('amplitude');
+    expect(
+      formatModemErrorFr({ kind: 'internal', message: 'boom' }),
+    ).toContain('boom');
+
+    expect(formatPageErrorFr({ kind: 'row-too-long', row: 5, length: 44 })).toContain(
+      '40 colonnes',
+    );
+    expect(formatPageErrorFr({ kind: 'too-many-rows' })).toContain('24 lignes');
+    expect(formatPageErrorFr({ kind: 'bad-bitmap', reason: '6x6' })).toContain(
+      'mosaïque',
+    );
+  });
+
+  it('decodes WAV files in Fichier mode faster than real time with progress, supports real-time streaming, and reports corrupted WAVs in French', () => {
+    const encoded = encodePage(SOMMAIRE_PREVIEW_PAGE_SOURCE);
+    expect(encoded.ok).toBe(true);
+    if (!encoded.ok) return;
+
+    const sampleRate = 16000;
+    const mod = modulate(encoded.value.bytes, {
+      sampleRate,
+      channel: 'forward',
+      tailIdleMs: 350,
+    });
+    expect(mod.ok).toBe(true);
+    if (!mod.ok) return;
+
+    const wavRes = writeWav(mod.value, sampleRate);
+    expect(wavRes.ok).toBe(true);
+    if (!wavRes.ok) return;
+
+    const engine = createLineEngine();
+    const progressSteps: number[] = [];
+    const fastMsg = engine.decodeWavFast(wavRes.value, (done, total) => {
+      progressSteps.push(Math.round((done / total) * 100));
+    });
+    expect(fastMsg.t).toBe('live');
+    expect(progressSteps.length).toBeGreaterThan(1);
+    expect(progressSteps[progressSteps.length - 1]).toBe(100);
+
+    const standby = decodePageSourceToScreen(STANDBY_PAGE_SOURCE);
+    let state = createInitialUiState(standby);
+    state = uiReducer(state, { type: 'SWITCH_MODE', mode: 'Fichier', standby });
+    state = uiReducer(state, {
+      type: 'FILE_START',
+      fileName: 'sommaire.wav',
+      realtime: false,
+    });
+    state = uiReducer(state, { type: 'FILE_PROGRESS', done: 50, total: 100 });
+    expect(state.file.progressPct).toBe(50);
+
+    if (fastMsg.t === 'live') {
+      const nonDiag = fastMsg.events.filter((ev) => ev.e !== 'diag');
+      state = uiReducer(state, {
+        type: 'FILE_FAST_COMPLETE',
+        events: nonDiag,
+      });
+    }
+    expect(state.file.status).toBe('done');
+    expect(state.file.progressPct).toBe(100);
+    expect(
+      screensEqual(
+        state.shown,
+        decodePageSourceToScreen(SOMMAIRE_PREVIEW_PAGE_SOURCE),
+      ),
+    ).toBe(true);
+    expect(state.completedAriaSummary).toContain('3615 SOMMAIRE');
+
+    // Invalid WAV produces typed error -> translated into plain French for FileDrop UI
+    const badWavRes = engine.decodeWavFast(new Uint8Array([1, 2, 3, 4]));
+    expect(badWavRes.t).toBe('error');
+    if (badWavRes.t === 'error') {
+      const frMsg = formatModemErrorFr(badWavRes.error);
+      expect(frMsg).toContain('WAV trop court');
+      state = uiReducer(state, {
+        type: 'FILE_ERROR',
+        fileName: 'corrompu.wav',
+        message: frMsg,
+      });
+      const dropHtml = renderToStaticMarkup(
+        createElement(FileDrop, {
+          fileState: state.file,
+          onSelectWavFile: () => undefined,
+          onToggleRealtime: () => undefined,
+        }),
+      );
+      expect(dropHtml).toContain('WAV trop court');
+      expect(dropHtml).toContain('Choisir un fichier .wav');
+    }
+
+    const barHtml = renderToStaticMarkup(
+      createElement(FileModeBar, {
+        fileState: {
+          ...INITIAL_FILE_MODE_STATE,
+          status: 'done',
+          fileName: 'L1.wav',
+          progressPct: 100,
+        },
+        hasLoadedBuffer: true,
+        onSelectWavFile: () => undefined,
+        onToggleRealtime: () => undefined,
+        onReplayFast: () => undefined,
+        onReplayRealtime: () => undefined,
+        onStopPlayback: () => undefined,
+      }),
+    );
+    expect(barHtml).toContain('100 %');
+    expect(barHtml).toContain('Décoder rapidement');
+    expect(barHtml).toContain('Écouter en temps réel');
+  });
+
+  it('exposes keyboard skip link, aria-live completed screen summary, and keeps gzipped JS bundle strictly < 1 MB', () => {
+    const appHtml = renderToStaticMarkup(createElement(App));
+    expect(appHtml).toContain('href="#nm-terminal-main"');
+    expect(appHtml).toContain('id="nm-terminal-main"');
+    expect(appHtml).toContain('aria-live="polite"');
+
+    const bundleReport = checkBundleSize();
+    expect(bundleReport.issues).toEqual([]);
+    expect(bundleReport.ok).toBe(true);
+    expect(bundleReport.totalGzipJsBytes).toBeGreaterThan(0);
+    expect(bundleReport.totalGzipJsBytes).toBeLessThan(MAX_GZIPPED_JS_BYTES);
+
+    // Vite dev-server guard: no file in src/ may import directly from public/
+    function listSrcFiles(dir: string): string[] {
+      const res: string[] = [];
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) {
+          res.push(...listSrcFiles(full));
+        } else if (/\.(ts|tsx|mts|js|mjs)$/.test(entry)) {
+          res.push(full);
+        }
+      }
+      return res;
+    }
+
+    for (const srcFile of listSrcFiles(resolve(process.cwd(), 'src'))) {
+      const code = readFileSync(srcFile, 'utf8');
+      expect(code).not.toMatch(/from\s+['"][^'"]*\/public\//);
+    }
   });
 });
 

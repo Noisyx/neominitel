@@ -8,7 +8,7 @@ import {
   FANTOME_STORY_L4_PAGE,
   FANTOME_STORY_L5_PAGE,
 } from '../../content/pages/fantome';
-import defaultManifestJson from '../../public/transmissions/manifest.json';
+import defaultManifestJson from '../fantome/manifest.json';
 import {
   checkFantomeCodeSync,
   createFantomeProgressStore,

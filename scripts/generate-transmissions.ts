@@ -632,11 +632,17 @@ export function generateAllTransmissions(
     levels: manifestLevels,
   };
 
-  writeFileSync(
-    join(outDir, 'manifest.json'),
-    `${JSON.stringify(manifest, null, 2)}\n`,
-    'utf8',
-  );
+  const manifestJsonText = `${JSON.stringify(manifest, null, 2)}\n`;
+  writeFileSync(join(outDir, 'manifest.json'), manifestJsonText, 'utf8');
+
+  const defaultPublicOutDir = join(rootDir, 'public', 'transmissions');
+  if (resolve(outDir) === resolve(defaultPublicOutDir)) {
+    writeFileSync(
+      join(rootDir, 'src', 'fantome', 'manifest.json'),
+      manifestJsonText,
+      'utf8',
+    );
+  }
 
   return manifest;
 }
@@ -654,6 +660,21 @@ export function verifyCommittedTransmissions(options?: {
 
   if (!existsSync(manifestPath)) {
     throw new Error(`[fantome --verify-only] Missing manifest at ${manifestPath}`);
+  }
+
+  const defaultPublicOutDir = join(rootDir, 'public', 'transmissions');
+  if (resolve(outDir) === resolve(defaultPublicOutDir)) {
+    const srcManifestPath = join(rootDir, 'src', 'fantome', 'manifest.json');
+    if (!existsSync(srcManifestPath)) {
+      throw new Error(
+        `[fantome --verify-only] Missing synced manifest at ${srcManifestPath}`,
+      );
+    }
+    if (readFileSync(srcManifestPath, 'utf8') !== readFileSync(manifestPath, 'utf8')) {
+      throw new Error(
+        '[fantome --verify-only] src/fantome/manifest.json differs from public/transmissions/manifest.json',
+      );
+    }
   }
 
   const levels = JSON.parse(
