@@ -109,6 +109,24 @@ body {
   flex-wrap: wrap;
 }
 
+/* Wide screens: fixed 3-column grid so the mode bar never shifts when the
+   toolbar changes width (e.g. the Son button is hidden in Écoute mode). */
+@media (min-width: 1081px) {
+  .nm-topbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  }
+
+  .nm-topbar > .nm-brand {
+    justify-self: start;
+  }
+
+  .nm-topbar > .nm-toolbar {
+    justify-self: end;
+    justify-content: flex-end;
+  }
+}
+
 .nm-brand {
   display: flex;
   align-items: baseline;
@@ -575,9 +593,19 @@ body {
 
 /* Signature detail: 2-row bevelled Minitel keycaps (5 top + 4 bottom with wide Envoi) */
 .nm-keypad {
+  container-type: inline-size;
   display: grid;
   grid-template-columns: repeat(10, minmax(0, 1fr));
   gap: 8px;
+}
+
+/* Label + shortcut chip need ~140px per keycap (5 per row ≈ 730px). On a
+   narrower keypad (e.g. HUD open) drop the chips instead of truncating the
+   labels; the shortcut stays in the keycap's title tooltip. */
+@container (max-width: 730px) {
+  .nm-keycap-shortcut {
+    display: none;
+  }
 }
 
 .nm-keycap {
