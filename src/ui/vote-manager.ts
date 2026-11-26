@@ -104,6 +104,20 @@ export function preparePageVote(
 }
 
 /**
+ * Clears `pendingTx` before streaming a WAV archive (`3615 FANTOME` or `Fichier`),
+ * so `recordCompletedPageVote` groups repetitions by `>= 80%` similarity matching.
+ */
+export function prepareWavVote(store: VoteStore): VoteStore {
+  if (store.pendingTx === null) {
+    return store;
+  }
+  return {
+    ...store,
+    pendingTx: null,
+  };
+}
+
+/**
  * Records a completed `pageEnd` screen into the immutable `VoteStore`:
  * - In `Seul` / `Serveur` (with `pendingTx`), adds to `buckets[pageId]`.
  * - In `Écoute` / `Fichier` (or WAV playback without `pendingTx`), joins the bucket whose

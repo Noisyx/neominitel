@@ -4,6 +4,7 @@ import { DEFAULT_SIM_PARAMS, type SimParams } from '../../workers/protocol';
 export interface SimControlsProps {
   sim: SimParams;
   canReplay: boolean;
+  disabled?: boolean;
   onChangeSim: (next: SimParams) => void;
   onReplaySeeded: () => void;
 }
@@ -23,6 +24,7 @@ function formatSigned(val: number, unit: string, decimals = 0): string {
 export function SimControls({
   sim,
   canReplay,
+  disabled = false,
   onChangeSim,
   onReplaySeeded,
 }: SimControlsProps): ReactElement {
@@ -46,14 +48,20 @@ export function SimControls({
   return (
     <section
       className="nm-sim-panel"
+      data-disabled={disabled ? 'true' : 'false'}
       aria-label="Simulateur de ligne téléphonique"
     >
       <div className="nm-sim-header">
-        <span className="nm-sim-title">Simulateur de ligne (mode Seul)</span>
+        <span className="nm-sim-title">
+          {disabled
+            ? 'Simulateur suspendu (archive WAV 3615 FANTOME en lecture)'
+            : 'Simulateur de ligne (mode Seul)'}
+        </span>
         <div className="nm-sim-actions">
           <button
             type="button"
             className="nm-hud-mini-btn"
+            disabled={disabled}
             onClick={handleResetClean}
           >
             Ligne propre
@@ -61,13 +69,15 @@ export function SimControls({
           <button
             type="button"
             className="nm-hud-mini-btn"
-            disabled={!canReplay}
+            disabled={disabled || !canReplay}
             onClick={onReplaySeeded}
           >
             Rejouer la graine
           </button>
         </div>
       </div>
+
+      <fieldset className="nm-sim-fieldset" disabled={disabled}>
 
       <div className="nm-sim-sliders">
         {/* Eb/N0: 0..30 dB + clean */}
@@ -224,6 +234,7 @@ export function SimControls({
           />
         </label>
       </div>
+      </fieldset>
     </section>
   );
 }

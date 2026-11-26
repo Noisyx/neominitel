@@ -86,6 +86,7 @@ function cloneOutput(out: ServiceOutput): ServiceOutput {
     ...(out.input ? { input: { ...out.input } } : {}),
     ...(out.testPattern ? { testPattern: { ...out.testPattern } } : {}),
     ...(out.playWav !== undefined ? { playWav: out.playWav } : {}),
+    ...(out.downloadWav ? { downloadWav: { ...out.downloadWav } } : {}),
   };
 }
 

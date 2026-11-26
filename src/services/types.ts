@@ -29,8 +29,14 @@ export interface ServiceOutput {
   input?: InputFieldSpec;
   /** 3615 MATHS bench: append PN9 test frames after the page. */
   testPattern?: { frames: number };
-  /** 3615 FANTOME: stream and decode this WAV path instead of `bytes`. */
+  /** 3615 FANTOME: stream and decode this WAV path instead of `bytes` (simulator off). */
   playWav?: string;
+  /** 3615 FANTOME: optional direct WAV link so the player can play it from another device. */
+  downloadWav?: {
+    readonly url: string;
+    readonly filename: string;
+    readonly label: string;
+  };
 }
 
 export interface Service<S> {
