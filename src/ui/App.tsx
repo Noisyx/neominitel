@@ -235,6 +235,17 @@ function activeInputSpec(router: RouterState | null): InputFieldSpec | undefined
   return router?.lastOutput.input;
 }
 
+function resolvePublicAssetUrl(rawUrl: string): string {
+  if (/^(https?:|blob:|data:)/i.test(rawUrl)) {
+    return rawUrl;
+  }
+  const base =
+    (import.meta as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? '/';
+  const normalizedBase = base.endsWith('/') ? base : `${base}/`;
+  const cleanRel = rawUrl.replace(/^\/+/, '');
+  return `${normalizedBase}${cleanRel}`;
+}
+
 export function uiReducer(state: UiState, action: UiAction): UiState {
   switch (action.type) {
     case 'SWITCH_MODE': {
@@ -810,7 +821,7 @@ export function App(): ReactElement {
   }, [standbyScreen, stopAllPipelines]);
 
   useEffect(() => {
-    playerRef.current = createGaplessPlayer(false);
+    playerRef.current = createGaplessPlayer(stateRef.current.muted);
     const scheduler = schedulerRef.current;
 
     const rafLoop = startRafScheduler(
@@ -836,7 +847,19 @@ export function App(): ReactElement {
       },
     );
 
+    const unlockSpeakerOnGesture = (): void => {
+      if (stateRef.current.mode !== 'Ecoute') {
+        playerRef.current?.unlockFromGesture();
+      }
+    };
+    window.addEventListener('pointerdown', unlockSpeakerOnGesture, {
+      passive: true,
+    });
+    window.addEventListener('keydown', unlockSpeakerOnGesture);
+
     return () => {
+      window.removeEventListener('pointerdown', unlockSpeakerOnGesture);
+      window.removeEventListener('keydown', unlockSpeakerOnGesture);
       rafLoop.stop();
       scheduler.clear();
       micCaptureRef.current?.stop();
@@ -847,6 +870,10 @@ export function App(): ReactElement {
       playerRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    playerRef.current?.setMuted(state.muted);
+  }, [state.muted]);
 
   // Requirement 10.3: 10 s no-carrier hint in Écoute mode
   useEffect(() => {
@@ -917,10 +944,20 @@ export function App(): ReactElement {
 
   const handleSelectMode = useCallback(
     (nextMode: LineMode): void => {
+      const leavingMicMode =
+        micCaptureRef.current !== null || stateRef.current.mode === 'Ecoute';
       stopAllPipelines();
       postToWorker({ t: 'reset' });
       workerInitializedRef.current = false;
       resetHudSignalBuffer(hudBufferRef.current);
+
+      if (leavingMicMode && nextMode !== 'Ecoute') {
+        playerRef.current?.resetContext();
+      }
+      if (nextMode === 'Seul' || nextMode === 'Serveur') {
+        playerRef.current?.unlockFromGesture();
+      }
+
       dispatch({ type: 'SWITCH_MODE', mode: nextMode, standby: standbyScreen });
 
       if (nextMode === 'Ecoute') {
@@ -956,7 +993,7 @@ export function App(): ReactElement {
 
       if (output.playWav) {
         try {
-          const response = await fetch(output.playWav);
+          const response = await fetch(resolvePublicAssetUrl(output.playWav));
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
           }
@@ -1030,6 +1067,7 @@ export function App(): ReactElement {
     if (isServerMode) {
       playerRef.current?.setMuted(false);
     }
+    playerRef.current?.unlockFromGesture();
     const { state: nextRouter, effect } = connectRouter();
     dispatch({
       type: 'BEGIN_SESSION',
@@ -1048,6 +1086,7 @@ export function App(): ReactElement {
           handleDisconnect();
           break;
         case 'transmit':
+          playerRef.current?.unlockFromGesture();
           if (nextRouter) {
             dispatch({ type: 'UPDATE_ROUTER_FOR_TRANSMIT', router: nextRouter });
           }
@@ -1070,6 +1109,7 @@ export function App(): ReactElement {
 
   const handleQuickLaunchService = useCallback(
     (serviceId: ServiceId): void => {
+      playerRef.current?.unlockFromGesture();
       const targetSvc = getServiceById(serviceId);
       const [serviceState, output] = targetSvc.init();
       const nextRouter: RouterState = {
@@ -1101,6 +1141,7 @@ export function App(): ReactElement {
         return;
       }
 
+      playerRef.current?.unlockFromGesture();
       if (current.session === 'start' || current.router === null) {
         if (key === 'ConnexionFin') {
           void handleConnect();
@@ -1128,6 +1169,9 @@ export function App(): ReactElement {
 
   const handleToggleMute = useCallback((): void => {
     const nextMuted = !stateRef.current.muted;
+    if (!nextMuted) {
+      playerRef.current?.unlockFromGesture();
+    }
     playerRef.current?.setMuted(nextMuted);
     dispatch({ type: 'TOGGLE_MUTE' });
   }, []);
@@ -1418,14 +1462,18 @@ export function App(): ReactElement {
                       <div className="nm-wav-links">
                         <a
                           className="nm-btn nm-wav-link"
-                          href={state.router.lastOutput.downloadWav.url}
+                          href={resolvePublicAssetUrl(
+                            state.router.lastOutput.downloadWav.url,
+                          )}
                           download={state.router.lastOutput.downloadWav.filename}
                         >
                           Télécharger le .wav
                         </a>
                         <a
                           className="nm-btn nm-wav-link"
-                          href={state.router.lastOutput.downloadWav.url}
+                          href={resolvePublicAssetUrl(
+                            state.router.lastOutput.downloadWav.url,
+                          )}
                           target="_blank"
                           rel="noreferrer"
                         >
