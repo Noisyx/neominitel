@@ -31,7 +31,7 @@ Starting values (to calibrate, task 5):
 | Level | Damage |
 |---|---|
 | L1 | clean |
-| L2 | noise, Eb/N0 ≈ 12.5 dB (initial draft: 10 dB; adjusted for Curve-3 BER so page has ~17 parity erasures with CER = 0 on code row) |
+| L2 | noise, Eb/N0 ≈ 13.5 dB (initial draft: 10 dB; then 12.5 dB for ~17 parity erasures with CER = 0 on code row; raised to 13.5 dB by the task 5 simulated pre-calibration, because at 12.5 dB any new noise on an acoustic path breaks the code row about one time in two, see `docs/calibration.md` "FANTOME") |
 | L3 | offset +380 Hz, Eb/N0 ≈ 18 dB |
 | L4 | whisper, Eb/N0 ≈ 11.5 dB, 7 repeats, 1 s gaps (initial draft: 5 dB; adjusted for Curve-3 BER where 5 dB has 60% BER, while 11.5 dB gives 100% single-pass code-row CER and 0% 7-vote CER) |
 | L5 | `[STRETCH]` backward channel carries the code page; forward carries a decoy page ("Il n'y a rien ici…") — added to `levels.json` in task 7 once `v23-modem` task 14 lands |
