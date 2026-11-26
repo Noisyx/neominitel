@@ -226,3 +226,52 @@ on 40 seeds; 17 dB gives no error at all, so the test has 0.5 dB of margin to th
   recovery could bring M6 closer to 12 dB; both change behaviour the app shows and need a spec
   decision first.
 - 3615 MATHS should present 10⁻³ near 15 dB (curve 3), not 12 dB.
+
+## A4: noisy loopback with majority vote (Role A property, recorded here per tech.md)
+
+**Property (`neominitel-app/design.md`, table A4):** at Eb/N0 = X dB and 5 repetitions, the voted
+screen matches the reference on ≥ 99 % of cells, for 10 seeds. Design target before calibration:
+X = 8 dB.
+
+**Measured by Role A** (neominitel-app task 10.2; method and table in `neominitel-app/design.md`,
+"Vote"). Page `sommaire/accueil`; chain `modulate` → `createChannel` (AWGN at Eb/N0) →
+`StreamingDemodulator` → `VideotexDecoder` → `IncrementalVote`; seeds `0x3615_0001` to
+`0x3615_0014`. CER = cell error rate.
+
+| Eb/N0 (dB) | fs (Hz) | seeds with CER ≤ 1 % | mean CER, 1 reception | mean CER, 5-vote | worst CER, 5-vote |
+|---|---|---|---|---|---|
+| 8.0 | 16 000 | 0/20 | 84.92 % | 79.60 % | 79.60 % |
+| 12.0 | 16 000 | 0/20 | 26.76 % | 12.50 % | 24.10 % |
+| 13.0 | 16 000 | 14/20 | 11.02 % | 0.83 % | 2.70 % |
+| 13.5 | 8 000 | 19/20 | 5.61 % | 0.09 % | 1.20 % |
+| 13.5 | 16 000 | 20/20 | 5.99 % | 0.09 % | 0.80 % |
+| 13.5 | 48 000 | 9/10 | 5.15 % | 0.15 % | 1.10 % |
+| **14.0** | 8 000 | **20/20** | 2.90 % | 0.01 % | 0.10 % |
+| **14.0** | 16 000 | **20/20** | 3.39 % | 0.01 % | 0.20 % |
+| **14.0** | 48 000 | **10/10** | 2.65 % | 0.00 % | 0.00 % |
+
+**Decision: A4 is calibrated to Eb/N0 = 14.0 dB**, the first 0.5 dB level at which every sample
+rate passes. Role B agrees with the value.
+
+**Why 8 dB cannot be met: the same receiver limit as M6.**
+- At 8 dB the receiver itself is far from error-free: curve 3 reads 0.37 (`public/data/ber-curve3.json`)
+  and about 16 % of the frames are lost or misaligned already at 10 dB (section "M6", task 10
+  measurement in `v23-modem/design.md` "Quality"). Each character then has a large chance of being
+  wrong, in every reception.
+- **Why the vote cannot repair it (Hypothesis, not measured here):** when the UART misses a start
+  bit, it can lock onto a later edge and decode misaligned characters with valid parity and stop
+  bit (characterization test "inverting the start bit loses that frame", task 6). A misaligned
+  character that lands on a Videotex control code (cursor move, row change) shifts the rest of the
+  page, so the errors are not confined to one cell and differ from one reception to the next. A
+  cell-by-cell vote cannot repair a shifted page. This matches Role A's observation (79.6 % CER
+  after 5 votes at 8 dB, against 84.9 % for one reception).
+- From 13 dB the receptions are mostly aligned, and the vote works as designed: 5 votes bring the
+  CER from about 3 % to ≤ 0.2 % at 14 dB.
+
+**What could lower A4 (not done, needs a spec decision):** a stricter UART resynchronisation that
+drops doubtful frames (marked as errors, so the vote and the decoder skip them) instead of decoding
+them misaligned. It changes the modem output and the M4 characterisation tests, so it would be a
+new modem task, measured against both M6 and A4.
+
+For the demo, the noise slider of 3615 MATHS and the vote demonstration should stay at or above
+14 dB for a page that the vote repairs, and around 12 dB to show damage the vote only partly repairs.
