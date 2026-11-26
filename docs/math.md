@@ -471,3 +471,29 @@ Reading:
 **For the 3615 MATHS chart** (Role A, display): curve 4 has the same format and the same Eb/N0 grid
 as curve 3, so it can be drawn as a second band next to curve 3. Suggested caption: « Corrélateurs :
 meilleurs sous 15 dB, moins bons au-dessus ».
+
+---
+
+## 9. Image to mosaic (videotex task 9)
+
+**Problem.** A mosaic cell is 2 × 3 blocks and can show only two colours, the foreground and the
+background, chosen among the 8 of the palette. Given the six block colours x₁…x₆ of an image
+(after resampling), choose (fg, bg) and the on/off pattern that minimise the squared error
+E = Σₖ min(‖xₖ − c_fg‖², ‖xₖ − c_bg‖²).
+
+**Exact solution by enumeration (`Identity`).** For a fixed pair, the best pattern is to give each
+block its nearer colour, independently: the error is a sum of terms that each depend on one block.
+So the optimum over all patterns is the minimum over the 8 single colours and C(8, 2) = 28 pairs:
+36 candidates × 6 blocks × 2 distances per cell, about 430 distance evaluations, 400 000 for a full
+40 × 24 page. No heuristic is needed; property V12 checks the optimum against a brute force.
+
+**Limits (`Hypothesis`, not measured).** The distance is squared RGB, not a perceptual distance, and
+the default palette is the one the app draws (`COLOUR_PALETTE_RGB`), not a measured Minitel CRT. On a
+black-and-white Minitel 1 the same code can be run with `MONOCHROME_PALETTE_RGB` as the palette.
+
+**Error diffusion.** Without diffusion, a flat area halfway between two palette colours becomes one
+flat colour. Floyd–Steinberg diffusion carries each block's residual to the blocks of cells not yet
+decided (7/16 right, 3/16 down-left, 5/16 down, 1/16 down-right, renormalised over the targets that
+remain), so the average colour of an area is kept. Measured on a flat grey 128 with a black and
+white palette: 100 % white blocks without diffusion; with it, 53.1 % on 8 × 4 cells and 50.5 % on a
+full 40 × 24 page, for 128/245 ≈ 52 % expected (the test accepts 35 % to 65 %).

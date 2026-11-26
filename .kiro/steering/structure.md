@@ -32,6 +32,7 @@ src/
     encoder.ts          # PageSource -> bytes (robust encoding)
     mosaic.ts           # 2x3 G1 mapping, bitmap -> mosaic
     vote.ts             # Screen-level majority vote with erasures
+    image-mosaic.ts     # RGB image -> mosaic cells (best colour pair per cell, stretch)
   services/             # Pure service state machines. Spec: neominitel-app
     sommaire.ts  maths.ts  fantome.ts  libre.ts
     router.ts           # 3615 code -> service, key handling

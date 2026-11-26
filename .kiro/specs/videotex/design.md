@@ -137,6 +137,21 @@ function cellErrorRate(s: Screen, ref: Screen, rows?: number[]): number;
 ### Mosaic from image `[STRETCH]`
 For each 2×3 cell, try all 28 pairs of distinct palette colours plus the 8 single colours; assign each block to the nearer colour of the pair; keep the pair with the lowest squared error. Optional Floyd-Steinberg error diffusion between cells.
 
+Implementation (task 9, `src/videotex/image-mosaic.ts`, pure):
+```ts
+interface RgbImage { width: number; height: number; data: ArrayLike<number>; channels?: 3 | 4 }   // row-major, alpha ignored
+interface ImageMosaicOptions { palette?: readonly [number, number, number][]; diffusion?: boolean; row?: number; col?: number }
+interface MosaicCellChoice { fg: number; bg: number; blocks: [0|1, 0|1, 0|1, 0|1, 0|1, 0|1]; error: number }
+function resampleToBlocks(img: RgbImage, blocksWide: number, blocksHigh: number): MosaicResult<Float64Array>;
+function imageToMosaic(img: RgbImage, cols: number, rows: number, o?: ImageMosaicOptions):
+  MosaicResult<{ cells: MosaicCellChoice[][]; totalError: number; sources: MosaicSource[] }>;
+```
+- The image is first resampled to 2·cols × 3·rows blocks by a box filter (mean of the covered pixels, fractional coverage at the edges), so any image size works. The caller decodes the image file (canvas in the UI); the module has no DOM.
+- Distance: squared RGB distance to the palette colour (default `COLOUR_PALETTE_RGB`). Ties: a block equally near both colours takes the background; between candidates, the first in the order singles 0..7, then pairs (0,1), (0,2) … (6,7) wins. A pair is written fg < bg by colour code; a single colour c is fg = bg = c with every block off.
+- Diffusion: the residual of each block goes to blocks of cells not yet decided with the weights 7/16 (right), 3/16 (down-left), 5/16 (down), 1/16 (down-right); weights falling in decided cells or outside the image are dropped and the rest renormalised.
+- `sources`: one `MosaicSource` per horizontal run of cells with the same (fg, bg), at (row, col) (defaults 1, 1), ready for a `PageSource`. Errors (`bad-bitmap`): cols outside 1..40, rows outside 1..24, a grid that does not fit at (row, col), or image data shorter than width × height × channels.
+- Used by 3615 LIBRE (app task 16, Role A) for the image import.
+
 ### Vote
 - Two cells are equal when every field except `error` is equal.
 - For each cell, count values among non-error cells (a map from the serialized cell to its count). The winner needs a strict majority over the other values; otherwise, or if there are no valid votes, the cell is an error cell.
@@ -175,11 +190,13 @@ For each 2×3 cell, try all 28 pairs of distinct palette colours plus the 8 sing
 | V9 | Vote, majority: with N = 2k + 1 copies where each cell has at most k wrong (non-erased) values, the vote returns the reference exactly. |
 | V10 | Incremental vote equals batch vote for any order of the receptions. |
 | V11 | Keys: decodeKey(encodeKey(k)) = k for the nine function keys. |
+| V12 `[STRETCH]` | Image to mosaic optimality: without diffusion, every cell's squared error equals the error of its reported colours and blocks and is ≤ that of every single colour and every pair of the palette. |
+| V13 `[STRETCH]` | Image to mosaic round trip: an image with at most two palette colours per cell gives total error 0 (with or without diffusion), and decoding encodePage of its `sources` gives, cell by cell, the chosen G1 code, fg and bg. |
 
 ## Error handling
 - `PageError`: `{ kind: 'row-too-long'; row: number; length: number } | { kind: 'too-many-rows' } | { kind: 'bad-bitmap'; reason: string }`.
 - The decoder never throws (V6).
 
 ## Testing
-- Property tests V1-V11 in `tests/properties/videotex.test.ts`.
+- Property tests V1-V13 in `tests/properties/videotex.test.ts`.
 - Golden tests: a handful of hand-written byte sequences with expected screens, including every code in the tables.
