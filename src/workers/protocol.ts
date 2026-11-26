@@ -38,7 +38,7 @@ export type ToWorker =
   | { t: 'setThreshold'; mode: 'fixed' | 'adaptive' }
   | { t: 'capturePort'; port: MessagePort; sampleRate: number }
   | { t: 'stopCapture' }
-  | { t: 'decodeFile'; data: ArrayBuffer; realtime: boolean }
+  | { t: 'decodeFile'; id?: number; data: ArrayBuffer; realtime: boolean }
   | { t: 'reset' };
 
 export type TimedEvent = { atSample: number } & (
@@ -75,6 +75,7 @@ export type FromWorker =
       id: number;
       audio: Float32Array;
       startSample: number;
+      sampleRate?: number;
       events: TimedEvent[];
       done?: boolean;
     }

@@ -73,6 +73,7 @@ import {
   getActiveVoteProgression,
   getActiveVoteSummary,
   preparePageVote,
+  prepareWavVote,
   recordCompletedPageVote,
   selectDisplayedScreenForVote,
   type VoteStore,
@@ -296,20 +297,38 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
     }
 
     case 'UPDATE_ROUTER_FOR_TRANSMIT': {
-      const baseVotes = action.resetVote ? createEmptyVoteStore() : state.votes;
-      const nextVotes = preparePageVote(
-        baseVotes,
-        action.router.lastOutput.pageId,
-        action.router.lastOutput.bytes,
-      );
+      const isWavOutput = action.router.lastOutput.playWav !== undefined;
+      const sameWav =
+        isWavOutput &&
+        !action.resetVote &&
+        state.router?.lastOutput.playWav === action.router.lastOutput.playWav;
+
+      let nextVotes: VoteStore;
+      if (isWavOutput) {
+        nextVotes = sameWav
+          ? prepareWavVote(state.votes)
+          : createEmptyVoteStore();
+      } else {
+        const baseVotes = action.resetVote ? createEmptyVoteStore() : state.votes;
+        nextVotes = preparePageVote(
+          baseVotes,
+          action.router.lastOutput.pageId,
+          action.router.lastOutput.bytes,
+        );
+      }
+
       const samePage =
         !action.resetVote &&
         state.router?.lastOutput.pageId === action.router.lastOutput.pageId;
+      const nextBase =
+        isWavOutput && !sameWav ? createBlankScreen() : state.baseScreen;
+
       return {
         ...state,
         session: state.session === 'start' ? 'connecting' : 'online',
         router: action.router,
-        shown: overlayInputFieldOnScreen(state.baseScreen, undefined, ''),
+        baseScreen: nextBase,
+        shown: overlayInputFieldOnScreen(nextBase, undefined, ''),
         pageComplete: false,
         votes: nextVotes,
         cps: 0,
@@ -666,6 +685,7 @@ export function App(): ReactElement {
   const micCaptureRef = useRef<ActiveMicCapture | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const workerInitializedRef = useRef<boolean>(false);
+  const lastStreamWasWavRef = useRef<boolean>(false);
   const schedulerRef = useRef<EventScheduler<TimedEvent>>(
     createEventScheduler<TimedEvent>(),
   );
@@ -721,6 +741,7 @@ export function App(): ReactElement {
             id: msg.id,
             audio: msg.audio,
             startSample: msg.startSample,
+            sampleRate: msg.sampleRate,
             onEnded: (endedId) => {
               if (endedId === txIdRef.current) {
                 worker.postMessage({ t: 'ackBlock', id: endedId } satisfies ToWorker);
@@ -933,9 +954,49 @@ export function App(): ReactElement {
       const nextId = txIdRef.current + 1;
       txIdRef.current = nextId;
 
-      if (!workerInitializedRef.current || withConnectionSequence || forceReinit) {
+      if (output.playWav) {
+        try {
+          const response = await fetch(output.playWav);
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const wavBuffer = await response.arrayBuffer();
+          if (txIdRef.current !== nextId) {
+            return;
+          }
+          lastStreamWasWavRef.current = true;
+          postToWorker({ t: 'stopTransmit' });
+          postToWorker({ t: 'setThreshold', mode: stateRef.current.threshold });
+          postToWorker(
+            {
+              t: 'decodeFile',
+              id: nextId,
+              data: wavBuffer,
+              realtime: true,
+            },
+            [wavBuffer],
+          );
+        } catch {
+          if (txIdRef.current === nextId) {
+            dispatch({
+              type: 'DISCONNECT',
+              standby: standbyScreen,
+              notice: 'Impossible de charger le fichier audio de cette transmission.',
+            });
+          }
+        }
+        return;
+      }
+
+      if (
+        !workerInitializedRef.current ||
+        withConnectionSequence ||
+        forceReinit ||
+        lastStreamWasWavRef.current
+      ) {
         postToWorker({ t: 'init', sampleRate });
         workerInitializedRef.current = true;
+        lastStreamWasWavRef.current = false;
       } else {
         postToWorker({ t: 'stopTransmit' });
       }
@@ -953,7 +1014,7 @@ export function App(): ReactElement {
         testPattern: output.testPattern,
       });
     },
-    [postToWorker, spawnLineWorker],
+    [postToWorker, spawnLineWorker, standbyScreen],
   );
 
   const handleDisconnect = useCallback((): void => {
@@ -1345,6 +1406,37 @@ export function App(): ReactElement {
 
                 {isInteractiveServiceMode &&
                   state.session === 'online' &&
+                  state.router?.lastOutput.downloadWav && (
+                    <div
+                      className="nm-wav-bar"
+                      role="group"
+                      aria-label="Écoute sur un second appareil"
+                    >
+                      <span className="nm-server-bar-label">
+                        {`Archive audio (${state.router.lastOutput.downloadWav.label}) :`}
+                      </span>
+                      <div className="nm-wav-links">
+                        <a
+                          className="nm-btn nm-wav-link"
+                          href={state.router.lastOutput.downloadWav.url}
+                          download={state.router.lastOutput.downloadWav.filename}
+                        >
+                          Télécharger le .wav
+                        </a>
+                        <a
+                          className="nm-btn nm-wav-link"
+                          href={state.router.lastOutput.downloadWav.url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Lire sur un autre appareil
+                        </a>
+                      </div>
+                    </div>
+                  )}
+
+                {isInteractiveServiceMode &&
+                  state.session === 'online' &&
                   currentField &&
                   state.router && (
                     <InputOverlay
@@ -1367,6 +1459,7 @@ export function App(): ReactElement {
                   <SimControls
                     sim={state.sim}
                     canReplay={state.session !== 'start' && state.router !== null}
+                    disabled={state.router?.lastOutput.playWav !== undefined}
                     onChangeSim={handleChangeSim}
                     onReplaySeeded={handleReplaySeeded}
                   />

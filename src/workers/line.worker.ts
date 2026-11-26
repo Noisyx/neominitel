@@ -156,7 +156,24 @@ workerScope.onmessage = (event: MessageEvent<ToWorker>): void => {
       }
 
       case 'decodeFile': {
-        // Implemented in App Task 12 (File mode)
+        blocksInFlight = 0;
+        detachCapturePort();
+        if (msg.realtime) {
+          const err = engine.startRealtimeWav({
+            id: msg.id ?? 1,
+            data: msg.data,
+          });
+          if (err) {
+            postFromWorker(err);
+            break;
+          }
+          pumpTransmitBlocks();
+        } else {
+          const res = engine.decodeWavFast(msg.data, (done, total) => {
+            postFromWorker({ t: 'fileProgress', done, total });
+          });
+          postFromWorker(res);
+        }
         break;
       }
 

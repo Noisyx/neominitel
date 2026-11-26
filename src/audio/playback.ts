@@ -2,6 +2,8 @@ export interface AudioBlockInput {
   id: number;
   audio: Float32Array;
   startSample: number;
+  /** Optional buffer sample rate (e.g. 16000 Hz when playing a WAV file on a 48000 Hz AudioContext). */
+  sampleRate?: number;
   onEnded?: (id: number) => void;
 }
 
@@ -42,6 +44,7 @@ export function createGaplessPlayer(initialMuted = false): GaplessPlayer {
   let gainNode: GainNode | null = null;
   let muted = initialMuted;
   let sampleRate = 48000;
+  let streamSampleRate = 48000;
 
   // Maps stream sample 0 to `anchorTimeSec` on the active clock (AudioContext.currentTime or performance.now()/1000)
   let anchorTimeSec: number | null = null;
@@ -65,6 +68,7 @@ export function createGaplessPlayer(initialMuted = false): GaplessPlayer {
           try {
             ctx = new Ctor();
             sampleRate = ctx.sampleRate;
+            streamSampleRate = ctx.sampleRate;
             gainNode = ctx.createGain();
             gainNode.gain.value = muted ? 0 : 1;
             gainNode.connect(ctx.destination);
@@ -88,11 +92,15 @@ export function createGaplessPlayer(initialMuted = false): GaplessPlayer {
       return sampleRate;
     },
 
-    scheduleBlock({ id, audio, startSample, onEnded }): void {
+    scheduleBlock({ id, audio, startSample, sampleRate: blockSampleRate, onEnded }): void {
       if (audio.length === 0) {
         onEnded?.(id);
         return;
       }
+
+      const blockRate =
+        blockSampleRate && blockSampleRate > 0 ? blockSampleRate : sampleRate;
+      streamSampleRate = blockRate;
 
       if (ctx && gainNode) {
         const now = ctx.currentTime;
@@ -100,11 +108,11 @@ export function createGaplessPlayer(initialMuted = false): GaplessPlayer {
         const idealStart =
           anchorTimeSec === null
             ? now + lookahead
-            : anchorTimeSec + startSample / sampleRate;
+            : anchorTimeSec + startSample / blockRate;
         const playAt = idealStart < now ? now + lookahead : idealStart;
-        anchorTimeSec = playAt - startSample / sampleRate;
+        anchorTimeSec = playAt - startSample / blockRate;
 
-        const buffer = ctx.createBuffer(1, audio.length, sampleRate);
+        const buffer = ctx.createBuffer(1, audio.length, blockRate);
         buffer.getChannelData(0).set(audio);
 
         const source = ctx.createBufferSource();
@@ -127,10 +135,10 @@ export function createGaplessPlayer(initialMuted = false): GaplessPlayer {
       const idealStart =
         anchorTimeSec === null
           ? nowSec + 0.01
-          : Math.max(fallbackNextTimeSec, anchorTimeSec + startSample / sampleRate);
+          : Math.max(fallbackNextTimeSec, anchorTimeSec + startSample / blockRate);
       const playAt = Math.max(nowSec, idealStart);
-      anchorTimeSec = playAt - startSample / sampleRate;
-      const durationSec = audio.length / sampleRate;
+      anchorTimeSec = playAt - startSample / blockRate;
+      const durationSec = audio.length / blockRate;
       fallbackNextTimeSec = playAt + durationSec;
 
       if (typeof window !== 'undefined') {
@@ -153,7 +161,7 @@ export function createGaplessPlayer(initialMuted = false): GaplessPlayer {
       if (elapsedSec <= 0) {
         return 0;
       }
-      return Math.floor(elapsedSec * sampleRate);
+      return Math.floor(elapsedSec * streamSampleRate);
     },
 
     setMuted(nextMuted: boolean): void {

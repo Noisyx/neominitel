@@ -2,6 +2,7 @@ import { C0, createVideotexDecoder, type Cell, type VideotexDecoder } from '../v
 import {
   BerCounter,
   pn9Frames,
+  readWav,
   type DemodEvent,
   type StreamingDemodulator,
 } from '../modem';
@@ -39,6 +40,9 @@ interface ActiveTransmission {
   inPn9Phase: boolean;
   pn9Audio: Float32Array | null;
   pn9Offset: number;
+  /** Non-null when streaming a pre-recorded WAV (3615 FANTOME `playWav` or `Fichier` realtime). */
+  rawWavSamples: Float32Array | null;
+  rawWavOffset: number;
 }
 
 export interface LineEngineOptions {
@@ -55,6 +59,16 @@ export interface LineEngine {
     withConnectionSequence?: boolean;
     testPattern?: { frames: number };
   }): FromWorker | null;
+  /** Starts real-time 100 ms block streaming of a WAV buffer (simulator disabled, Req 2.3). */
+  startRealtimeWav(params: {
+    id: number;
+    data: ArrayBuffer | Uint8Array;
+  }): FromWorker | null;
+  /** Decodes a WAV buffer faster than real time in 4096-sample chunks, reporting progress. */
+  decodeWavFast(
+    data: ArrayBuffer | Uint8Array,
+    onProgress?: (done: number, total: number) => void,
+  ): Extract<FromWorker, { t: 'live' } | { t: 'error' }>;
   /** Produces the next 100 ms `{ t: 'block', ... }` message, or `null` if no transmission is active. */
   nextTransmitBlock(): Extract<FromWorker, { t: 'block' }> | null;
   hasActiveTransmit(): boolean;
@@ -126,7 +140,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
     return CLEAN_BENCH_EBN0_DB;
   }
 
-  function createFreshDemodulator(): FromWorker | null {
+  function createFreshDemodulator(): Extract<FromWorker, { t: 'error' }> | null {
     // Until modem task 8 lands, only threshold: 'fixed' is accepted on initialization (design.md)
     const initialThreshold = thresholdMode === 'adaptive' ? 'adaptive' : 'fixed';
     let res = modem.createDemodulator({
@@ -173,6 +187,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
               e: 'pageEnd',
               screen: vtxDecoder.screen(),
             });
+            vtxDecoder.reset();
             pageActive = false;
           }
           break;
@@ -254,6 +269,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
         e: 'pageEnd',
         screen: vtxDecoder.screen(),
       });
+      vtxDecoder.reset();
       pageActive = false;
     }
 
@@ -381,6 +397,8 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
         inPn9Phase: false,
         pn9Audio: null,
         pn9Offset: 0,
+        rawWavSamples: null,
+        rawWavOffset: 0,
       };
 
       if (connectionAudio && demod) {
@@ -391,12 +409,175 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       return null;
     },
 
+    startRealtimeWav({ id, data }): FromWorker | null {
+      const parsed = readWav(data);
+      if (!parsed.ok) {
+        return { t: 'error', error: parsed.error };
+      }
+
+      sampleRate = parsed.value.sampleRate;
+      streamSampleCursor = 0;
+      demodSampleOrigin = 0;
+      pageActive = false;
+      lastCharGlobalSample = 0;
+      vtxDecoder.reset();
+      spectrum.reset();
+      berCounter.reset();
+
+      const demodErr = createFreshDemodulator();
+      if (demodErr) {
+        return demodErr;
+      }
+
+      activeTx = {
+        id,
+        pageId: 'wav/realtime',
+        simulate: false,
+        connectionAudio: null,
+        connectionOffset: 0,
+        connectSampleOffset: 0,
+        connectEmitted: true,
+        pageBytes: new Uint8Array(0),
+        pageAudio: null,
+        pageOffset: 0,
+        testPatternFrames: 0,
+        inPn9Phase: false,
+        pn9Audio: null,
+        pn9Offset: 0,
+        rawWavSamples: parsed.value.samples,
+        rawWavOffset: 0,
+      };
+      return null;
+    },
+
+    decodeWavFast(
+      data: ArrayBuffer | Uint8Array,
+      onProgress?: (done: number, total: number) => void,
+    ): Extract<FromWorker, { t: 'live' } | { t: 'error' }> {
+      const parsed = readWav(data);
+      if (!parsed.ok) {
+        return { t: 'error', error: parsed.error };
+      }
+
+      activeTx = null;
+      sampleRate = parsed.value.sampleRate;
+      streamSampleCursor = 0;
+      demodSampleOrigin = 0;
+      pageActive = false;
+      lastCharGlobalSample = 0;
+      vtxDecoder.reset();
+      spectrum.reset();
+      berCounter.reset();
+
+      const demodErr = createFreshDemodulator();
+      if (demodErr || !demod) {
+        return (
+          demodErr ?? {
+            t: 'error',
+            error: { kind: 'internal', message: 'Demodulator initialization failed' },
+          }
+        );
+      }
+
+      const samples = parsed.value.samples;
+      const total = samples.length;
+      const chunkLen = 4096;
+      const allEvents: TimedEvent[] = [];
+
+      for (let offset = 0; offset < total; offset += chunkLen) {
+        const end = Math.min(total, offset + chunkLen);
+        const slice = samples.subarray(offset, end);
+        streamSampleCursor = end;
+        spectrum.pushSamples(slice);
+        const rawEvents = demod.push(slice);
+        for (const ev of convertDemodEvents(rawEvents, streamSampleCursor)) {
+          allEvents.push(ev);
+        }
+        onProgress?.(end, total);
+      }
+
+      const flushed = demod.flush();
+      for (const ev of convertDemodEvents(flushed, streamSampleCursor)) {
+        allEvents.push(ev);
+      }
+      if (pageActive) {
+        allEvents.push({
+          atSample: streamSampleCursor,
+          e: 'pageEnd',
+          screen: vtxDecoder.screen(),
+        });
+        vtxDecoder.reset();
+        pageActive = false;
+      }
+
+      return { t: 'live', events: allEvents };
+    },
+
     nextTransmitBlock(): Extract<FromWorker, { t: 'block' }> | null {
-      if (!activeTx || !demod || !simulator) {
+      if (!activeTx || !demod) {
         return null;
       }
 
       const blockSamples = Math.max(1, Math.round(BLOCK_DURATION_SEC * sampleRate));
+
+      // Phase 0: stream pre-recorded WAV samples (3615 FANTOME `playWav` or `Fichier` realtime; simulator off)
+      if (activeTx.rawWavSamples !== null) {
+        if (activeTx.rawWavOffset >= activeTx.rawWavSamples.length) {
+          activeTx = null;
+          return null;
+        }
+        const remainingWav =
+          activeTx.rawWavSamples.length - activeTx.rawWavOffset;
+        const takeWav = Math.min(blockSamples, remainingWav);
+        const wavSlice = activeTx.rawWavSamples.subarray(
+          activeTx.rawWavOffset,
+          activeTx.rawWavOffset + takeWav,
+        );
+        activeTx.rawWavOffset += takeWav;
+        const isLastWavBlock =
+          activeTx.rawWavOffset >= activeTx.rawWavSamples.length;
+
+        const blockStart = streamSampleCursor;
+        streamSampleCursor += wavSlice.length;
+
+        spectrum.pushSamples(wavSlice);
+        const rawWavEvents = demod.push(wavSlice);
+        if (isLastWavBlock) {
+          for (const f of demod.flush()) {
+            rawWavEvents.push(f);
+          }
+        }
+
+        const eventsWav = convertDemodEvents(rawWavEvents, streamSampleCursor);
+        if (isLastWavBlock && pageActive) {
+          eventsWav.push({
+            atSample: streamSampleCursor,
+            e: 'pageEnd',
+            screen: vtxDecoder.screen(),
+          });
+          vtxDecoder.reset();
+          pageActive = false;
+        }
+
+        const wavTxId = activeTx.id;
+        if (isLastWavBlock) {
+          activeTx = null;
+        }
+
+        return {
+          t: 'block',
+          id: wavTxId,
+          audio: normalizeAudioForPlayback(wavSlice),
+          startSample: blockStart,
+          sampleRate,
+          events: eventsWav,
+          done: isLastWavBlock,
+        };
+      }
+
+      if (!simulator) {
+        return null;
+      }
 
       // Phase 1: stream connection sequence if requested
       if (
@@ -454,6 +635,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
           id: txId,
           audio: normalizeAudioForPlayback(processed),
           startSample: blockStartSample,
+          sampleRate,
           events,
           done: isAllDone,
         };
@@ -542,6 +724,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
           id: txIdPn9,
           audio: normalizeAudioForPlayback(processedPn9),
           startSample: blockStart,
+          sampleRate,
           events: eventsPn9,
           done: isLastPn9Block,
         };
@@ -621,6 +804,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
         id: txId,
         audio: normalizeAudioForPlayback(processed),
         startSample: blockStartSample,
+        sampleRate,
         events,
         done: isLastPageBlock && !hasPn9Next,
       };
