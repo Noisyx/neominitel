@@ -31,10 +31,10 @@ Starting values (to calibrate, task 5):
 | Level | Damage |
 |---|---|
 | L1 | clean |
-| L2 | noise, Eb/N0 ≈ 10 dB |
+| L2 | noise, Eb/N0 ≈ 12.5 dB (initial draft: 10 dB; adjusted for Curve-3 BER so page has ~17 parity erasures with CER = 0 on code row) |
 | L3 | offset +380 Hz, Eb/N0 ≈ 18 dB |
-| L4 | whisper, Eb/N0 ≈ 5 dB, 7 repeats, 1 s gaps |
-| L5 | backward channel carries the code page; forward carries a decoy page ("Il n'y a rien ici…") |
+| L4 | whisper, Eb/N0 ≈ 11.5 dB, 7 repeats, 1 s gaps (initial draft: 5 dB; adjusted for Curve-3 BER where 5 dB has 60% BER, while 11.5 dB gives 100% single-pass code-row CER and 0% 7-vote CER) |
+| L5 | `[STRETCH]` backward channel carries the code page; forward carries a decoy page ("Il n'y a rien ici…") — added to `levels.json` in task 7 once `v23-modem` task 14 lands |
 
 ## Manifest (`public/transmissions/manifest.json`, served)
 
