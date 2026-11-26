@@ -23,6 +23,7 @@ src/
     theory.ts           # BER curves (orthogonal reference, Marcum Q formula)
     channel.ts          # Line simulator: AWGN, frequency offset, clock offset, hum, bursts
     demodulator.ts      # Streaming demodulator + events
+    correlator.ts       # Second receiver: per-bit quadrature correlators (3615 MATHS, stretch)
     wav.ts              # WAV read/write
   videotex/             # Pure Videotex (no DOM). Spec: videotex
     codes.ts            # C0 codes, ESC attributes, SEP keys, SS2 accents

@@ -80,8 +80,9 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - [x] 14.2 Property test M13.
   - _Requirements: 12.1-12.3_
 
-- [ ] 15. Correlator demodulator `[STRETCH]` (mathematician)
+- [x] 15. Correlator demodulator `[STRETCH]` (mathematician)
   - Non-coherent quadrature correlators per bit, BER comparison plotted in 3615 MATHS.
+  - Done on the modem side: `src/modem/correlator.ts`, properties M14 and M15, curve 4 in `public/data/ber-curve4.json`, `docs/math.md` section 8. Drawing curve 4 in the 3615 MATHS chart is UI work (Role A).
 
 - [ ] 16. Interoperability `[STRETCH]`
   - Decode a license-checked real recording; verify output with an independent decoder and record the command.

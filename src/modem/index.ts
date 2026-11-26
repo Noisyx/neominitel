@@ -1,7 +1,7 @@
 // Public barrel of the V.23 modem core: the only import point for code outside src/modem/
 // (structure.md, dependency rule). Implementations are exported here as they land:
 // modulate / connectionSequence (task 3), readWav / writeWav (task 4), createDemodulator (task 7), channel (task 9),
-// PN9 / BER / Wilson (task 10), theory (task 11). createDemodulator is the real demodulator from
+// PN9 / BER / Wilson (task 10), theory (task 11), correlator receiver (task 15, stretch). createDemodulator is the real demodulator from
 // task 7: src/workers/modem-bridge.ts switches the app from src/workers/fake-modem.ts to it as soon
 // as this export exists. No `quality` events are emitted before task 10.
 export * from './types';
@@ -24,3 +24,9 @@ export {
 } from './channel';
 export { pn9Frames, BerCounter, wilsonInterval, wilson95, type BerSnapshot } from './prbs';
 export { FORWARD_RHO, berOrthogonalNoncoherent, berNoncoherentCorrelated } from './theory';
+export {
+  createCorrelatorDemodulator,
+  type CorrelatorOptions,
+  type CorrelatorChar,
+  type CorrelatorDemodulator,
+} from './correlator';

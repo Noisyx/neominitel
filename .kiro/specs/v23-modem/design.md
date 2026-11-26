@@ -277,7 +277,25 @@ These notes are for the mathematician to check and extend.
 - Reference curve 2, non-coherent binary signals with correlation ρ (envelope detection):
   P_b = Q₁(a, b) − ½·exp(−(a² + b²)/2)·I₀(ab), with a, b = √(E_b/2N₀ · (1 ∓ √(1 − |ρ|²))). Q₁ is the Marcum Q function. To be confirmed by the mathematician.
 - Curve 3, what our receiver actually does: a Monte Carlo simulation of the full modulator → channel → demodulator chain, with Wilson intervals. The live points in 3615 MATHS must fall inside this band. The gap between curves 2 and 3 shows the price of a discriminator receiver compared with an ideal one.
-- `[STRETCH]` A second demodulator: two non-coherent quadrature correlators per bit (energy comparison), plotted next to the discriminator.
+- `[STRETCH]` A second demodulator: two non-coherent quadrature correlators per bit (energy comparison), plotted next to the discriminator. Done in task 15 (section "Correlator demodulator" below); curve 4 is its Monte Carlo curve.
+
+### Correlator demodulator (task 15, `src/modem/correlator.ts`)
+```ts
+interface CorrelatorOptions { sampleRate: number; channel?: ChannelId }            // default 'forward'
+interface CorrelatorChar { value: number; parityOk: boolean; framingOk: boolean; atSample: number; minConfidence: number }
+interface CorrelatorDemodulator {
+  readonly sampleRate: number; readonly channel: ChannelId; readonly windowSamples: number;   // N = round(fs / baud)
+  push(chunk: Float32Array): CorrelatorChar[]; flush(): CorrelatorChar[]; reset(): void;
+}
+function createCorrelatorDemodulator(o: CorrelatorOptions): Result<CorrelatorDemodulator, ModemError>;
+```
+An addition to the barrel `index.ts`; the shared contract (`modulate`, `StreamingDemodulator`, `DemodEvent`) is unchanged.
+- Statistic: for each tone f, z_f(n) = Σ over the last N samples of x[m]·e^{−j2πfm/fs} (closed-form phase, `mixerPhaseCycles`), d(n) = |z_mark|² − |z_space|², dated at the window centre. This is the per-bit envelope detector of curve 2, on the raw input (no filter, no decimation).
+- Framing, its own: a start edge is a crossing of d from > 0 to ≤ 0, interpolated linearly. Before the first frame since reset or flush (acquisition), the edge also needs round(T/2) centres with d > 0 before it; this rejects the noise on the opening ramp. Bit k is the sign of d at the centre nearest t_e + (k + ½)T (mark when d > 0). A start bit read as mark is a false start. The hunt resumes after the stop bit.
+- No carrier detection, no threshold, no events other than characters: it is a test-bench receiver for 3615 MATHS, not a replacement for `createDemodulator`. Deterministic and chunk-invariant; `push` never throws. Errors: `bad-sample-rate`, `bad-option` "channel".
+- Curve 4: `scripts/montecarlo-ber.ts --receiver correlator` writes `public/data/ber-curve4.json`, same chain, grid, seeds and format as curve 3 (`chainBer` option `receiver: 'correlator'`).
+- Measured (`docs/math.md` section 8): curve 4 is below curve 3 from 0 to 14 dB (7.8·10⁻² against 1.6·10⁻¹ at 10 dB) and above it from 16 dB (1.8·10⁻⁴ against 9.8·10⁻⁵). Curve 4 stays above curve 2: even with exact timing, the single-bit correlator ignores the phase memory of the CPFSK signal, and the real signal leaves image terms that curve 2 (complex baseband) does not have.
+- Variants rejected after measurement (task 15): the acquisition gate on every edge (frames lost after each noise dip in a stop bit; BER at 10 dB 1.5·10⁻¹), timing by a least-squares fit of the frame's transitions or by maximising Σ|d| at the bit centres (the crossings are biased by the tone phases, and the maximum picks wrong offsets on frames with few transitions; both worse at every Eb/N0), and the UART timing of `createDemodulator` with correlator bits (worse than the discriminator at every Eb/N0).
 
 ## Correctness properties
 | ID | Property |
@@ -295,6 +313,8 @@ These notes are for the mathematician to check and extend.
 | M11 | PN9: period is 511; with k injected bit errors among n bits and no framing errors, the counter reports exactly k errors. |
 | M12 | Theory: curve 1 and curve 2 are decreasing in Eb/N0; curve 2 equals curve 1 when ρ = 0 (numerical check ≤ 1e-6). |
 | M13 `[STRETCH]` | Full duplex: forward and backward at equal amplitude are both decoded without error at 20 dB SNR. |
+| M14 `[STRETCH]` | Correlator round trip: for any 7-bit bytes, any standard fs and any chunking, the correlator receiver decodes modulate() exactly (all `parityOk` and `framingOk`, identical output for every chunking), on both channels. |
+| M15 `[STRETCH]` | Correlator BER: at Eb/N0 = 10 dB (16 kHz, 20 000 PN9 bits per seed, `BerCounter`, seeds pooled), the correlator's BER is below the discriminator's; at the M6 level (16.5 dB) it is ≤ 1e-3 for every seed. |
 
 ## Error handling
 - Bad sample rate (outside 8-96 kHz) or byte > 127: typed `ModemError`.
@@ -302,6 +322,6 @@ These notes are for the mathematician to check and extend.
 - The demodulator never throws on any input.
 
 ## Testing
-- Property tests M1-M13 in `tests/properties/v23-modem.test.ts` with seeded RNG.
+- Property tests M1-M15 in `tests/properties/v23-modem.test.ts` with seeded RNG. M15 uses seeds 1-3 in fast mode and 1-10 in slow mode.
 - Two modes with identical test names: fast (default) and slow (`NEOMINITEL_SLOW=1`: more cases). No property is skipped in fast mode. The Monte Carlo property M6 keeps its Eb/N0, bit count and 10⁻³ limit in both modes; fast mode checks seeds 1-3 (about 3 s), slow mode the 20 seeds of the property (about 22 s). M10 uses fewer rates and targets in fast mode.
 - Calibration script `scripts/calibrate-modem.ts`: BER vs Eb/N0 for both threshold modes, SNR estimator bias, written to `docs/calibration.md`.

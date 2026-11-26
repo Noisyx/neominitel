@@ -1,4 +1,4 @@
-// v23-modem tests (Role B). Correctness properties M1..M13 of .kiro/specs/v23-modem/design.md
+// v23-modem tests (Role B). Correctness properties M1..M15 of .kiro/specs/v23-modem/design.md
 // are added here, one test named after each property, as their tasks land.
 // Fast mode by default; slow mode (`npm run test:slow`, NEOMINITEL_SLOW=1) runs more cases.
 import { createHash } from 'node:crypto';
@@ -56,6 +56,7 @@ import { m2m4, snrReport } from '../../src/modem/quality';
 import { FORWARD_RHO, berNoncoherentCorrelated, berOrthogonalNoncoherent } from '../../src/modem';
 import { marcumQ1 } from '../../src/modem/theory';
 import { chainBer, framesForBits } from '../helpers/modem-ber';
+import { createCorrelatorDemodulator, type CorrelatorChar } from '../../src/modem';
 import { CARRIER, DISCRIMINATOR } from '../../src/modem/v23';
 import {
   ComplexDecimatingFir,
@@ -3731,33 +3732,41 @@ describe('v23-modem task 11: theory curves', () => {
   });
 
   it('curve 3 file: public/data/ber-curve3.json has the format of design.md and consistent intervals', () => {
-    const data = JSON.parse(readFileSync(join(ROOT, 'public', 'data', 'ber-curve3.json'), 'utf8')) as {
-      ebN0Db: number[];
-      ber: number[];
-      lo: number[];
-      hi: number[];
-      bitsPerPoint: number[];
-      seeds: number;
-    };
-    expect(Object.keys(data).sort()).toEqual(['ber', 'bitsPerPoint', 'ebN0Db', 'hi', 'lo', 'seeds']);
-    const n = data.ebN0Db.length;
-    expect(n).toBeGreaterThan(5);
-    for (const k of ['ber', 'lo', 'hi', 'bitsPerPoint'] as const) expect(data[k]).toHaveLength(n);
-    expect(Number.isInteger(data.seeds) && data.seeds > 0).toBe(true);
-    for (let i = 0; i < n; i++) {
-      if (i > 0) expect(data.ebN0Db[i]).toBeGreaterThan(data.ebN0Db[i - 1]);
-      // Fewer bits are compared at low Eb/N0 (lost frames); at least 10 seeds x 5 000 remain.
-      expect(Number.isInteger(data.bitsPerPoint[i]) && data.bitsPerPoint[i] >= data.seeds * 5000).toBe(true);
-      expect(data.lo[i]).toBeLessThanOrEqual(data.ber[i]);
-      expect(data.ber[i]).toBeLessThanOrEqual(data.hi[i]);
-      // The interval is the 95 % Wilson interval of the pooled counts.
-      const errors = Math.round(data.ber[i] * data.bitsPerPoint[i]);
-      const w = wilson95(errors, data.bitsPerPoint[i]);
-      expect(data.lo[i]).toBeCloseTo(w.lo, 12);
-      expect(data.hi[i]).toBeCloseTo(w.hi, 12);
-    }
+    checkCurveFile('ber-curve3.json');
   });
 });
+
+interface CurveFile {
+  ebN0Db: number[];
+  ber: number[];
+  lo: number[];
+  hi: number[];
+  bitsPerPoint: number[];
+  seeds: number;
+}
+
+/** Format of design.md "Theory API" (curves 3 and 4), with the Wilson intervals of the pooled counts. */
+function checkCurveFile(name: string): CurveFile {
+  const data = JSON.parse(readFileSync(join(ROOT, 'public', 'data', name), 'utf8')) as CurveFile;
+  expect(Object.keys(data).sort()).toEqual(['ber', 'bitsPerPoint', 'ebN0Db', 'hi', 'lo', 'seeds']);
+  const n = data.ebN0Db.length;
+  expect(n).toBeGreaterThan(5);
+  for (const k of ['ber', 'lo', 'hi', 'bitsPerPoint'] as const) expect(data[k]).toHaveLength(n);
+  expect(Number.isInteger(data.seeds) && data.seeds > 0).toBe(true);
+  for (let i = 0; i < n; i++) {
+    if (i > 0) expect(data.ebN0Db[i]).toBeGreaterThan(data.ebN0Db[i - 1]);
+    // Fewer bits are compared at low Eb/N0 (lost frames); at least 10 seeds x 5 000 remain.
+    expect(Number.isInteger(data.bitsPerPoint[i]) && data.bitsPerPoint[i] >= data.seeds * 5000).toBe(true);
+    expect(data.lo[i]).toBeLessThanOrEqual(data.ber[i]);
+    expect(data.ber[i]).toBeLessThanOrEqual(data.hi[i]);
+    // The interval is the 95 % Wilson interval of the pooled counts.
+    const errors = Math.round(data.ber[i] * data.bitsPerPoint[i]);
+    const w = wilson95(errors, data.bitsPerPoint[i]);
+    expect(data.lo[i]).toBeCloseTo(w.lo, 12);
+    expect(data.hi[i]).toBeCloseTo(w.hi, 12);
+  }
+  return data;
+}
 
 // ---------------------------------------------------------------------------------------------
 // Task 12: calibration (requirements 3.2 and 9.3; docs/calibration.md)
@@ -3902,5 +3911,103 @@ describe('v23-modem task 14: backward channel', () => {
     expect(exactChars(events, BACK_TEXT)).toBe(true);
     const q = qualityOf(events);
     expect(Math.abs(q[q.length - 1].offsetHz - 20)).toBeLessThanOrEqual(3);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 15: correlator demodulator (design.md "Correlator demodulator", docs/math.md section 8)
+
+describe('v23-modem task 15: correlator demodulator', () => {
+  /** Runs the correlator receiver on `x` in the given chunk sizes (cycled), then flushes. */
+  function correlate(x: Float32Array, fs: number, channel: 'forward' | 'backward', chunks: readonly number[] = [x.length]): CorrelatorChar[] {
+    const r = createCorrelatorDemodulator({ sampleRate: fs, channel });
+    if (!r.ok) throw new Error(JSON.stringify(r.error));
+    const out: CorrelatorChar[] = [];
+    let p = 0;
+    let k = 0;
+    while (p < x.length) {
+      const len = Math.max(1, Math.min(x.length - p, chunks[k++ % chunks.length]));
+      out.push(...r.value.push(x.subarray(p, p + len)));
+      p += len;
+    }
+    out.push(...r.value.flush());
+    return out;
+  }
+
+  it('factory: bad-sample-rate outside 8 000..96 000 Hz, bad-option for an unknown channel; N = round(fs / baud)', () => {
+    for (const fs of [7999, 96001, NaN, Infinity]) {
+      const r = createCorrelatorDemodulator({ sampleRate: fs });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.kind).toBe('bad-sample-rate');
+    }
+    const bad = createCorrelatorDemodulator({ sampleRate: 48000, channel: 'sideways' as unknown as 'forward' });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error).toMatchObject({ kind: 'bad-option', option: 'channel' });
+    for (const fs of STANDARD_SAMPLE_RATES) {
+      for (const ch of ['forward', 'backward'] as const) {
+        const r = createCorrelatorDemodulator({ sampleRate: fs, channel: ch });
+        expect(r.ok).toBe(true);
+        if (r.ok) expect(r.value.windowSamples).toBe(Math.round(fs / CHANNELS[ch].baud));
+      }
+    }
+  });
+
+  it('M14 correlator round trip: for any 7-bit bytes, rate and chunking, the correlator receiver decodes modulate() exactly, on both channels', () => {
+    fc.assert(
+      fc.property(
+        arbBytes7(1, 40),
+        arbStandardSampleRate(),
+        fc.array(fc.integer({ min: 1, max: 5000 }), { minLength: 1, maxLength: 8 }),
+        (bytes, fs, chunks) => {
+          const x = mustModulate(bytes, { sampleRate: fs });
+          const whole = correlate(x, fs, 'forward');
+          expect(whole.map((c) => c.value)).toEqual(Array.from(bytes));
+          expect(whole.every((c) => c.parityOk && c.framingOk)).toBe(true);
+          // Chunk invariance: the same characters, dates and confidences.
+          expect(correlate(x, fs, 'forward', chunks)).toEqual(whole);
+        },
+      ),
+      { numRuns: isSlowTestsEnabled() ? 100 : 15, seed: 1501 },
+    );
+    // Backward channel (75 baud: a few bytes per case, every standard rate).
+    for (const fs of STANDARD_SAMPLE_RATES) {
+      const bytes = Uint8Array.from(ascii('3615 ?'));
+      const got = correlate(mustModulate(bytes, { sampleRate: fs, channel: 'backward' }), fs, 'backward', [777, 4096]);
+      expect(got.map((c) => c.value), `backward fs=${fs}`).toEqual(Array.from(bytes));
+      expect(got.every((c) => c.parityOk && c.framingOk)).toBe(true);
+    }
+  });
+
+  it('M15 correlator BER: at Eb/N0 = 10 dB the correlator counted BER is below the discriminator\'s (pooled seeds), and at the M6 level it is <= 1e-3 per seed', () => {
+    const fs = 16000;
+    const seeds = isSlowTestsEnabled() ? 10 : 3;
+    const frames = framesForBits(20000);
+    const pooled = { disc: { e: 0, b: 0 }, corr: { e: 0, b: 0 } };
+    for (let seed = 1; seed <= seeds; seed++) {
+      const a = chainBer({ sampleRate: fs, ebN0Db: 10, seed, frames });
+      const c = chainBer({ sampleRate: fs, ebN0Db: 10, seed, frames, receiver: 'correlator' });
+      pooled.disc.e += a.errors;
+      pooled.disc.b += a.bits;
+      pooled.corr.e += c.errors;
+      pooled.corr.b += c.bits;
+    }
+    const disc = pooled.disc.e / pooled.disc.b;
+    const corr = pooled.corr.e / pooled.corr.b;
+    const high: string[] = [];
+    for (let seed = 1; seed <= seeds; seed++) {
+      const c = chainBer({ sampleRate: fs, ebN0Db: M6_EBN0_DB, seed, frames, receiver: 'correlator' });
+      high.push(c.ber.toExponential(2));
+      expect(c.ber, `seed ${seed} at ${M6_EBN0_DB} dB`).toBeLessThanOrEqual(1e-3);
+      expect(c.bits).toBeGreaterThanOrEqual(20000);
+    }
+    console.log(`M15 at 10 dB: discriminator ${disc.toExponential(3)}, correlator ${corr.toExponential(3)}; correlator at ${M6_EBN0_DB} dB per seed: ${high.join(' ')}`);
+    expect(corr).toBeLessThan(disc);
+  });
+
+  it('curve 4 file: public/data/ber-curve4.json has the format of curve 3 and the same Eb/N0 grid', () => {
+    const c3 = checkCurveFile('ber-curve3.json');
+    const c4 = checkCurveFile('ber-curve4.json');
+    expect(c4.ebN0Db).toEqual(c3.ebN0Db);
+    expect(c4.seeds).toBe(c3.seeds);
   });
 });
