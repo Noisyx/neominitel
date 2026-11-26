@@ -75,6 +75,13 @@ import {
   SCREEN_HEIGHT_PX,
   SCREEN_WIDTH_PX,
 } from '../../src/videotex/render';
+import {
+  cellErrorRate,
+  cellErrorRateByRow,
+  IncrementalVote,
+  vote,
+} from '../../src/videotex/vote';
+import { cloneScreen } from '../../src/videotex/screen';
 import { changedRowIndices } from '../helpers/screen-diff';
 import { isSlowTestsEnabled } from '../helpers/arbitraries';
 
@@ -951,5 +958,163 @@ describe('Videotex Property Tests', () => {
     const stream = createKeyDecoder();
     expect(stream.push({ value: C0.SEP, error: false })).toBeNull();
     expect(stream.push({ value: 0x41, error: true })).toBeNull();
+  });
+
+  it('V8 vote with erasures: with N copies where each cell is erased in at most N-1 copies, vote returns the reference exactly', () => {
+    const arbCase = fc.record({
+      page: arbValidPageSource,
+      copies: fc.integer({ min: 2, max: 6 }),
+      seedMasks: fc.uniqueArray(fc.integer({ min: 0, max: 999 }), {
+        minLength: 0,
+        maxLength: 150,
+      }),
+    });
+
+    fc.assert(
+      fc.property(arbCase, ({ page, copies, seedMasks }) => {
+        const built = buildPageScreen(page);
+        expect(built.ok).toBe(true);
+        if (!built.ok) return;
+        const ref = built.value.screen;
+
+        const receptions = Array.from({ length: copies }, () =>
+          cloneScreen(ref),
+        );
+
+        // Erase random distinct cells across copies while always keeping >= 1 surviving copy per cell
+        for (let i = 0; i < seedMasks.length; i++) {
+          const cellIdx = seedMasks[i];
+          const r = Math.floor(cellIdx / SCREEN_COLS);
+          const c = cellIdx % SCREEN_COLS;
+          const survivor = i % copies;
+          for (let k = 0; k < copies; k++) {
+            if (k !== survivor) {
+              receptions[k].rows[r][c] = createBlankCell({ error: true });
+            }
+          }
+        }
+
+        const res = vote(receptions);
+        expect(res.unresolved).toBe(0);
+        expect(screensEqual(res.screen, ref)).toBe(true);
+        expect(cellErrorRate(res.screen, ref)).toBe(0);
+      }),
+      { numRuns: runs(50, 200) },
+    );
+  });
+
+  it('V9 vote majority: with N = 2k + 1 copies where each cell has at most k wrong non-erased values, vote returns the reference exactly', () => {
+    const arbCase = fc.record({
+      page: arbValidPageSource,
+      k: fc.integer({ min: 1, max: 3 }),
+      corruptCells: fc.uniqueArray(
+        fc.record({
+          cellIdx: fc.integer({ min: 0, max: 999 }),
+          wrongCode: fc.integer({ min: 0x21, max: 0x7e }),
+          wrongFg: arbColour,
+        }),
+        {
+          selector: (item) => item.cellIdx,
+          minLength: 0,
+          maxLength: 120,
+        },
+      ),
+    });
+
+    fc.assert(
+      fc.property(arbCase, ({ page, k, corruptCells }) => {
+        const built = buildPageScreen(page);
+        expect(built.ok).toBe(true);
+        if (!built.ok) return;
+        const ref = built.value.screen;
+
+        const n = 2 * k + 1;
+        const receptions = Array.from({ length: n }, () => cloneScreen(ref));
+
+        for (let idx = 0; idx < corruptCells.length; idx++) {
+          const { cellIdx, wrongCode, wrongFg } = corruptCells[idx];
+          const r = Math.floor(cellIdx / SCREEN_COLS);
+          const c = cellIdx % SCREEN_COLS;
+          // Corrupt at most k copies at (r, c)
+          for (let copy = 0; copy < k; copy++) {
+            const targetCopy = (idx + copy) % n;
+            const altCode =
+              wrongCode === ref.rows[r][c].code
+                ? ((wrongCode - 0x20 + 1) % 94) + 0x21
+                : wrongCode;
+            receptions[targetCopy].rows[r][c] = createBlankCell({
+              code: altCode,
+              fg: wrongFg,
+              error: false,
+            });
+          }
+        }
+
+        const res = vote(receptions);
+        expect(res.unresolved).toBe(0);
+        expect(screensEqual(res.screen, ref)).toBe(true);
+      }),
+      { numRuns: runs(50, 200) },
+    );
+  });
+
+  it('V10 incremental vote equals batch vote for any order of the receptions (and computes per-row CER)', () => {
+    const arbCorruptedScreen = fc
+      .tuple(
+        arbValidPageSource,
+        fc.array(
+          fc.record({
+            idx: fc.integer({ min: 0, max: 999 }),
+            erased: fc.boolean(),
+            code: fc.integer({ min: 0x20, max: 0x7e }),
+          }),
+          { minLength: 0, maxLength: 80 },
+        ),
+      )
+      .map(([page, edits]) => {
+        const built = buildPageScreen(page);
+        const s = built.ok ? cloneScreen(built.value.screen) : createBlankScreen();
+        for (const e of edits) {
+          const r = Math.floor(e.idx / SCREEN_COLS);
+          const c = e.idx % SCREEN_COLS;
+          s.rows[r][c] = e.erased
+            ? createBlankCell({ error: true })
+            : createBlankCell({ code: e.code, error: false });
+        }
+        return s;
+      });
+
+    fc.assert(
+      fc.property(
+        fc.array(arbCorruptedScreen, { minLength: 1, maxLength: 6 }),
+        (screens) => {
+          const batchRes = vote(screens);
+
+          // Reverse and rotated orders via IncrementalVote
+          const reversed = [...screens].reverse();
+          const incRev = new IncrementalVote();
+          for (const s of reversed) {
+            incRev.add(s);
+          }
+          const revRes = incRev.result();
+
+          expect(revRes.unresolved).toBe(batchRes.unresolved);
+          expect(Array.from(revRes.agree)).toEqual(Array.from(batchRes.agree));
+          expect(Array.from(revRes.valid)).toEqual(Array.from(batchRes.valid));
+          expect(screensEqual(revRes.screen, batchRes.screen)).toBe(true);
+        },
+      ),
+      { numRuns: runs(50, 200) },
+    );
+
+    // Per-row and overall cellErrorRate check
+    const ref = createBlankScreen();
+    const damaged = cloneScreen(ref);
+    damaged.rows[3][0] = createBlankCell({ error: true });
+    damaged.rows[3][1] = createBlankCell({ code: 0x58 });
+    const byRow = cellErrorRateByRow(damaged, ref);
+    expect(byRow[3]).toBeCloseTo(2 / 40, 8);
+    expect(byRow[1]).toBe(0);
+    expect(cellErrorRate(damaged, ref)).toBeCloseTo(2 / 1000, 8);
   });
 });

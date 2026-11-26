@@ -31,10 +31,10 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - `encodeKey` / `decodeKey`; property test V11.
   - _Requirements: 7.1-7.2_
 
-- [ ] 6. Vote and metrics `[MVP]`
-  - [ ] 6.1 Batch vote and `IncrementalVote` with erasures.
-  - [ ] 6.2 Cell error rate per row and overall.
-  - [ ] 6.3 Property tests V8, V9, V10.
+- [x] 6. Vote and metrics `[MVP]`
+  - [x] 6.1 Batch vote and `IncrementalVote` with erasures.
+  - [x] 6.2 Cell error rate per row and overall.
+  - [x] 6.3 Property tests V8, V9, V10.
   - _Requirements: 8.1-8.4, 9.1_
 
 - [x] 7. Rendering model `[MVP]`

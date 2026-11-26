@@ -6,3 +6,4 @@ export * from './encoder';
 export * from './keys';
 export * from './font';
 export * from './render';
+export * from './vote';
