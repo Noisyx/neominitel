@@ -101,6 +101,11 @@ import {
   mathsService,
 } from '../../src/services/maths';
 import { MATHS_COURS_PAGES } from '../../content/pages/maths';
+import { blocksToG1Code, decodeBytes, imageToMosaic } from '../../src/videotex';
+import { applyImageCells, createBlankDraft, decodeShareFragment, draftToPageSource, encodeDraft, encodeShareFragment, setBackground, setBlock, setTextLines } from '../../src/services/libre-editor';
+import { LibreEditor } from '../../src/ui/screens/LibreEditor';
+import { encodeKey } from '../../src/videotex';
+import { backwardBytesForChar, createBackwardKeyListener } from '../../src/workers/back-keys';
 import { createEventScheduler } from '../../src/ui/scheduler';
 import {
   decodePageSourceToScreen,
@@ -2173,5 +2178,173 @@ describe('fantome Task 7 / neominitel-app: "Écoute voie retour" (backward recei
     const s1 = uiReducer(s0, { type: 'TOGGLE_RX_CHANNEL' });
     expect(s1.rxChannel).toBe('backward');
     expect(uiReducer(s1, { type: 'TOGGLE_RX_CHANNEL' }).rxChannel).toBe('forward');
+  });
+});
+
+describe('neominitel-app Task 16: 3615 LIBRE editor', () => {
+  it('a draft becomes a page: blocks give G1 cells with their colours, a text line replaces the drawing on its row, blank cells are not sent', () => {
+    let d = createBlankDraft();
+    expect(draftToPageSource(d).mosaics).toEqual([]); // blank cells are not sent
+    d = setBlock(d, 0, 0, true, 2); // cell (row 1, col 1), block b1, green
+    d = setBlock(d, 3, 5, true, 1); // cell (row 2, col 2), block b6, red
+    d = setBlock(d, 4, 3, true, 3); // cell (row 2, col 3), block b1, yellow
+    d = setBlock(d, 4, 3, false, 3); // switched off again
+    d = setBlock(d, 79, 71, true, 7); // last block of the page
+    d = setTextLines(d, [{ row: 1, text: 'TITRE', fg: 6 }, { row: 30, text: 'hors page', fg: 7 }, { row: 5, text: '', fg: 7 }]);
+    expect(d.lines).toEqual([{ row: 1, text: 'TITRE', fg: 6 }]);
+    const bytes = encodeDraft(d);
+    expect(bytes).not.toBeNull();
+    if (!bytes) return;
+    const screen = decodeBytes(bytes);
+    expect(rowToText(screen, 1).startsWith('TITRE')).toBe(true); // the text wins over block (0, 0)
+    const c22 = screen.rows[2][1];
+    expect(c22.set).toBe('G1');
+    expect(c22.code).toBe(blocksToG1Code([0, 0, 0, 0, 0, 1]));
+    expect(c22.fg).toBe(1);
+    const c23 = screen.rows[2][2];
+    expect(c23.set === 'G1' && c23.code !== blocksToG1Code([0, 0, 0, 0, 0, 0])).toBe(false);
+    const last = screen.rows[24][39];
+    expect(last.set).toBe('G1');
+    expect(last.code).toBe(blocksToG1Code([0, 0, 0, 0, 0, 1]));
+    expect(last.fg).toBe(7);
+  });
+
+  it('an image mosaic fills the drawing (kept text lines), and setBackground colours every cell', () => {
+    const img = { width: 80, height: 72, data: new Uint8Array(80 * 72 * 3).fill(255), channels: 3 as const };
+    const res = imageToMosaic(img, 40, 24);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    let d = setTextLines(createBlankDraft(), [{ row: 3, text: 'GARDE', fg: 2 }]);
+    d = applyImageCells(d, res.value.cells);
+    expect(d.lines).toHaveLength(1);
+    expect(d.cells[10][10].bg).toBe(7); // white image: single colour white
+    const bg = setBackground(createBlankDraft(), 4);
+    expect(bg.cells.every((row) => row.every((c) => c.bg === 4))).toBe(true);
+    const bytes = encodeDraft(d);
+    expect(bytes).not.toBeNull();
+    if (bytes) expect(rowToText(decodeBytes(bytes), 3).startsWith('GARDE')).toBe(true);
+  });
+
+  it('share link: decodeShareFragment(encodeShareFragment(b)) = b for any page bytes, and bad fragments are rejected', () => {
+    fc.assert(
+      fc.property(fc.array(fc.integer({ min: 0, max: 127 }), { minLength: 0, maxLength: 600 }), (tail) => {
+        const bytes = Uint8Array.from([0x0c, ...tail]);
+        const frag = encodeShareFragment(bytes);
+        expect(frag.startsWith('libre=')).toBe(true);
+        expect(/^libre=[A-Za-z0-9_-]*$/.test(frag)).toBe(true);
+        expect(Array.from(decodeShareFragment(`#${frag}`) ?? [])).toEqual(Array.from(bytes));
+        expect(Array.from(decodeShareFragment(`x=1&${frag}`) ?? [])).toEqual(Array.from(bytes));
+      }),
+      { numRuns: 100, seed: 1601 },
+    );
+    expect(decodeShareFragment('')).toBeNull();
+    expect(decodeShareFragment('#autre=AAAA')).toBeNull();
+    expect(decodeShareFragment('#libre=!!!!')).toBeNull();
+    expect(decodeShareFragment(`#${encodeShareFragment(Uint8Array.from([0x41, 0x42]))}`)).toBeNull(); // no FF
+    expect(decodeShareFragment(`#${encodeShareFragment(Uint8Array.from([0x0c, 0xc1]))}`)).toBeNull(); // 8-bit byte
+    expect(decodeShareFragment(`#${encodeShareFragment(new Uint8Array(8193).fill(0x0c))}`)).toBeNull(); // too long
+  });
+
+  it('WAV export: the worker engine builds a WAV that decodes back to the page of the draft', () => {
+    let d = setTextLines(createBlankDraft(), [{ row: 2, text: 'BONJOUR 3615', fg: 3 }]);
+    for (let x = 0; x < 80; x++) d = setBlock(d, x, 30, true, 5);
+    const bytes = encodeDraft(d);
+    expect(bytes).not.toBeNull();
+    if (!bytes) return;
+    const engine = createLineEngine();
+    const wav = engine.exportPageWav(bytes);
+    expect(wav.t).toBe('ok');
+    if (wav.t !== 'ok') return;
+    expect(engine.init(48000)).toBeNull();
+    const res = engine.decodeWavFast(wav.data);
+    expect(res.t).toBe('live');
+    if (res.t !== 'live') return;
+    const ends = res.events.filter((e): e is Extract<TimedEvent, { e: 'pageEnd' }> => e.e === 'pageEnd');
+    expect(ends.length).toBeGreaterThan(0);
+    expect(screensEqual(ends[ends.length - 1].screen, decodeBytes(bytes))).toBe(true);
+  });
+
+  it('the editor renders its tools and the three ways out (sound, WAV, link)', () => {
+    const html = renderToStaticMarkup(createElement(LibreEditor, { onSend: () => undefined, onExportWav: () => undefined, shareBaseUrl: 'https://x.test/' }));
+    for (const label of ['Crayon', 'Gomme', 'Importer une image', 'Envoyer par le son', 'Exporter en WAV', 'Copier le lien de partage', 'Ajouter une ligne']) {
+      expect(html, label).toContain(label);
+    }
+    expect(html).toMatch(/\d+ octets/);
+  });
+});
+
+describe('neominitel-app Task 17: backward keyboard (keys at 75 baud)', () => {
+  const fs = 16000;
+  // "MATHS" typed, then Envoi; then Suite.
+  const typed = [...'MATHS'].flatMap((c) => Array.from(backwardBytesForChar(c)));
+  const burst = Uint8Array.from([...typed, ...encodeKey('Envoi'), ...encodeKey('Suite')]);
+
+  function inputsOf(x: Float32Array): string[] {
+    const l = createBackwardKeyListener(fs);
+    if (!l.ok) throw new Error('listener');
+    const out: string[] = [];
+    for (let p = 0; p < x.length; p += 320) {
+      for (const i of l.value.push(x.subarray(p, Math.min(x.length, p + 320)))) out.push(i.kind === 'key' ? `[${i.key}]` : i.char);
+    }
+    return out;
+  }
+
+  it('the server-side receiver gives back the typed characters then the function keys, alone and under a forward page at equal amplitude', () => {
+    const back = modulate(burst, { sampleRate: fs, channel: 'backward', leadIdleMs: 120, tailIdleMs: 300 });
+    expect(back.ok).toBe(true);
+    if (!back.ok) return;
+    const expected = ['M', 'A', 'T', 'H', 'S', '[Envoi]', '[Suite]'];
+    expect(inputsOf(back.value)).toEqual(expected);
+
+    // Full duplex on the server: its own page on the forward channel reaches its microphone too.
+    const page = encodePage({ id: 't', rows: [{ row: 3, col: 1, segments: [{ text: 'PAGE DU SERVEUR EN COURS D ENVOI' }] }] });
+    expect(page.ok).toBe(true);
+    if (!page.ok) return;
+    const fwd = modulate(page.value.bytes, { sampleRate: fs, channel: 'forward' });
+    expect(fwd.ok).toBe(true);
+    if (!fwd.ok) return;
+    const mix = new Float32Array(back.value.length);
+    for (let i = 0; i < mix.length; i++) mix[i] = 0.5 * back.value[i] + 0.5 * fwd.value[i % fwd.value.length];
+    expect(inputsOf(mix)).toEqual(expected);
+  });
+
+  it('a SEP followed by an unknown code and non-printable bytes are not reported; backwardBytesForChar sends only G0 printable characters', () => {
+    const bytes = Uint8Array.from([0x13, 0x7a, 0x07, 0x41, ...encodeKey('Retour')]);
+    const back = modulate(bytes, { sampleRate: fs, channel: 'backward', leadIdleMs: 120, tailIdleMs: 300 });
+    expect(back.ok).toBe(true);
+    if (back.ok) expect(inputsOf(back.value)).toEqual(['A', '[Retour]']);
+    expect(Array.from(backwardBytesForChar('z'))).toEqual([0x7a]);
+    expect(backwardBytesForChar('é')).toHaveLength(0);
+    expect(backwardBytesForChar('ab')).toHaveLength(0);
+  });
+
+  it('line engine: modulateBackward on the terminal, startBackwardKeys / pushBackwardKeyChunk on the server give key and keyChar events', () => {
+    const terminal = createLineEngine();
+    const audio = terminal.modulateBackward(burst, fs);
+    expect(audio.t).toBe('ok');
+    if (audio.t !== 'ok') return;
+    const server = createLineEngine();
+    expect(server.startBackwardKeys(fs)).toBeNull();
+    const seen: string[] = [];
+    for (let p = 0; p < audio.audio.length; p += 960) {
+      const msg = server.pushBackwardKeyChunk(audio.audio.subarray(p, Math.min(audio.audio.length, p + 960)));
+      for (const ev of msg?.events ?? []) {
+        if (ev.e === 'key') seen.push(`[${ev.key}]`);
+        if (ev.e === 'keyChar') seen.push(ev.char);
+      }
+    }
+    expect(seen).toEqual(['M', 'A', 'T', 'H', 'S', '[Envoi]', '[Suite]']);
+    server.stopBackwardKeys();
+    expect(server.pushBackwardKeyChunk(audio.audio)).toBeNull();
+  });
+
+  it('TOGGLE_BACK_KEYS flips the toggle (default off) and BACK_KEYS_FAILED turns it off with a notice', () => {
+    const s0 = createInitialUiState(createBlankScreen());
+    expect(s0.backKeys).toBe(false);
+    const s1 = uiReducer(s0, { type: 'TOGGLE_BACK_KEYS' });
+    expect(s1.backKeys).toBe(true);
+    const s2 = uiReducer(s1, { type: 'BACK_KEYS_FAILED', message: 'micro refusé' });
+    expect(s2.backKeys).toBe(false);
+    expect(s2.notice).toBe('micro refusé');
   });
 });

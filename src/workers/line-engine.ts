@@ -3,10 +3,12 @@ import {
   BerCounter,
   pn9Frames,
   readWav,
+  writeWav,
   type ChannelId,
   type DemodEvent,
   type StreamingDemodulator,
 } from '../modem';
+import { createBackwardKeyListener, type BackwardKeyListener } from './back-keys';
 import { SpectrumAnalyzer512 } from './fft512';
 import {
   resolveModemProvider,
@@ -25,6 +27,8 @@ export const MAX_BLOCKS_AHEAD = 2; // <= 200 ms lookahead so setSim takes effect
 export const PAGE_IDLE_END_SEC = 0.3; // 300 ms of idle carrier after a page triggers pageEnd
 export const BER_REPORT_INTERVAL_SEC = 0.25; // emit live BER snapshots 4x/s during PN9 bench
 export const CLEAN_BENCH_EBN0_DB = 18; // x-axis ceiling when simulator noise is disabled ("clean")
+export const EXPORT_WAV_SAMPLE_RATE = 48000; // 3615 LIBRE WAV export
+export const BACK_KEY_IDLE_MS = 120; // idle carrier around a backward key burst (task 17)
 
 interface ActiveTransmission {
   id: number;
@@ -82,6 +86,21 @@ export interface LineEngine {
    * locally transmitted pages are always forward, so the app sets 'forward' before a transmit.
    */
   setRxChannel(channel: ChannelId): void;
+  /**
+   * 3615 LIBRE export: the connection sequence then the page at EXPORT_WAV_SAMPLE_RATE, as a
+   * 16-bit WAV. Independent of the engine's state (no transmission is started).
+   */
+  exportPageWav(bytes: Uint8Array): Extract<FromWorker, { t: 'error' }> | { t: 'ok'; data: Uint8Array };
+  /**
+   * Terminal side of the backward keyboard (task 17): the bytes at 75 baud, with short idle
+   * margins, at `sampleRate`, ready for the speaker. Independent of the forward pipeline.
+   */
+  modulateBackward(bytes: Uint8Array, sampleRate: number): Extract<FromWorker, { t: 'error' }> | { t: 'ok'; audio: Float32Array };
+  /** Server side: starts (or restarts) the backward key receiver at `sampleRate`. */
+  startBackwardKeys(sampleRate: number): Extract<FromWorker, { t: 'error' }> | null;
+  /** Server side: one microphone chunk into the backward key receiver; `key` / `keyChar` events. */
+  pushBackwardKeyChunk(chunk: Float32Array): Extract<FromWorker, { t: 'live' }> | null;
+  stopBackwardKeys(): void;
   pushLiveCaptureChunk(chunk: Float32Array): Extract<FromWorker, { t: 'live' }> | null;
   reset(): void;
 }
@@ -121,6 +140,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
   let simParams: SimParams = { ...DEFAULT_SIM_PARAMS };
   let thresholdMode: 'fixed' | 'adaptive' = 'fixed';
   let rxChannel: ChannelId = 'forward';
+  let backKeys: BackwardKeyListener | null = null; // server side of the backward keyboard (task 17)
 
   let demod: StreamingDemodulator | null = null;
   let simulator: StreamingSimulator | null = null;
@@ -862,6 +882,47 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       if (channel === rxChannel) return;
       rxChannel = channel;
       if (demod) createFreshDemodulator();
+    },
+
+    modulateBackward(bytes: Uint8Array, rate: number) {
+      const res = modem.modulate(bytes, { sampleRate: rate, channel: 'backward', leadIdleMs: BACK_KEY_IDLE_MS, tailIdleMs: BACK_KEY_IDLE_MS });
+      if (!res.ok) return { t: 'error', error: res.error };
+      return { t: 'ok', audio: res.value };
+    },
+
+    startBackwardKeys(rate: number) {
+      const res = createBackwardKeyListener(rate);
+      if (!res.ok) return { t: 'error', error: res.error };
+      backKeys = res.value;
+      return null;
+    },
+
+    pushBackwardKeyChunk(chunk: Float32Array) {
+      if (!backKeys) return null;
+      const events: TimedEvent[] = [];
+      // Dates are microphone samples since startBackwardKeys (the receiver's own time base).
+      for (const input of backKeys.push(chunk)) {
+        if (input.kind === 'key') events.push({ atSample: input.atSample, e: 'key', key: input.key });
+        else events.push({ atSample: input.atSample, e: 'keyChar', char: input.char });
+      }
+      return events.length > 0 ? { t: 'live', events } : null;
+    },
+
+    stopBackwardKeys(): void {
+      backKeys = null;
+    },
+
+    exportPageWav(bytes: Uint8Array) {
+      const fs = EXPORT_WAV_SAMPLE_RATE;
+      const intro = modem.connectionSequence({ sampleRate: fs });
+      const page = modem.modulate(bytes, { sampleRate: fs, channel: 'forward', tailIdleMs: Math.round(PAGE_IDLE_END_SEC * 1000) });
+      if (!page.ok) return { t: 'error', error: page.error };
+      const all = new Float32Array(intro.length + page.value.length);
+      all.set(intro, 0);
+      all.set(page.value, intro.length);
+      const wav = writeWav(all, fs);
+      if (!wav.ok) return { t: 'error', error: wav.error };
+      return { t: 'ok', data: wav.value };
     },
 
     pushLiveCaptureChunk(

@@ -136,7 +136,18 @@ The worker's events go through the scheduler into reducer actions. Diag frames a
 ## UI components (`src/ui/`)
 - `terminal/`: `MinitelShell` (original SVG case), `ScreenCanvas` (draws the render model, dirty cells only), `FunctionKeys`, `InputOverlay` (mobile text input).
 - `hud/`: `Waterfall`, `DiscriminatorTrace` (threshold line, bit windows), `EyeDiagram` (overlay of 2-bit windows), `QualityReadout`, `BerChart` (three theory curves from JSON + live points with intervals), `VotePanel`, toggles for "Accord automatique" and "Vote".
-- `screens/`: `ModeBar`, `SimControls`, `FileDrop`, `MicPermission`.
+- `screens/`: `ModeBar`, `SimControls`, `FileDrop`, `MicPermission`, `LibreEditor` (task 16).
+
+## Backward keyboard (task 17, requirement 12)
+- Toggle « Clavier voie retour » on the bezel, shown in Écoute and Serveur (UI state `backKeys`).
+- Terminal device (Écoute, microphone on): every function key except *Connexion/Fin* is sent as SEP + code, every typed G0 printable character (0x20..0x7E) as its byte, like a real Minitel. The worker modulates the bytes at 75 baud with 120 ms of idle carrier around them (`sendBackward` → `backAudio`) and the app plays them on the speaker, queued one after the other. The forward capture keeps running: the forward demodulator rejects the backward band (v23-modem requirement 5.1).
+- Server device (Serveur, session started): a second microphone capture feeds the worker's backward key receiver (`backCapturePort`, `src/workers/back-keys.ts`: backward demodulator, adaptive threshold, then the Videotex key decoder). It runs alongside the page transmissions: the backward low-pass rejects the forward band by more than 50 dB (v23-modem requirement 12.2). A received key or character goes through the same router path as a local key press or keystroke. A frame with a parity or framing error is dropped and cancels a pending SEP.
+- A microphone failure on the server turns the toggle off with a French notice.
+
+## 3615 LIBRE editor (task 16, requirement 11)
+- Model (`src/services/libre-editor.ts`, pure): a draft is a full-page mosaic of 40 × 24 cells (80 × 72 blocks), each cell with its own fg, bg and 6 blocks, plus at most 8 text lines; **a text line replaces the drawing on its row** (one segment at column 1). `draftToPageSource` emits one `MosaicSource` per horizontal run of non-blank cells with the same colours; blank cells (black background, no block) are left to the cleared screen. The page id is `libre/page`.
+- Drawing: pen (switches a block on and gives its cell the pen colour), eraser, background colour for the whole drawing, and image import through `imageToMosaic` (videotex task 9, 40 × 24 cells, optional diffusion), done on the main thread from a canvas `ImageData` (image processing, not DSP).
+- Ways out: **by sound** (the page goes through the normal transmit path as the LIBRE router output, so *Répétition* and the vote work), **WAV** (worker message `exportWav` → `wavExport`: connection sequence + page at 48 kHz, 16-bit; the DSP stays in the worker), **link** (`#libre=<base64url of the bytes>`; accepted only for 1 to 8192 bytes, all 7-bit, starting with FF). Opening the app with such a link and pressing *Connexion* starts the session on the shared page in 3615 LIBRE instead of SOMMAIRE.
 - `theme/`: tokens (beige case, dark glass, phosphor colours), CRT effect as a CSS overlay.
 
 ## Content (`content/pages/`)

@@ -41,6 +41,13 @@ export type ToWorker =
   | { t: 'capturePort'; port: MessagePort; sampleRate: number }
   | { t: 'stopCapture' }
   | { t: 'decodeFile'; id?: number; data: ArrayBuffer; realtime: boolean }
+  /** 3615 LIBRE: modulate a page (with the connection sequence) into a 16-bit WAV file. */
+  | { t: 'exportWav'; id: number; bytes: Uint8Array }
+  /** Backward keyboard, terminal side: modulate these bytes at 75 baud for the speaker. */
+  | { t: 'sendBackward'; id: number; bytes: Uint8Array; sampleRate: number }
+  /** Backward keyboard, server side: microphone port for the backward key receiver. */
+  | { t: 'backCapturePort'; port: MessagePort; sampleRate: number }
+  | { t: 'stopBackCapture' }
   | { t: 'reset' };
 
 export type TimedEvent = { atSample: number } & (
@@ -67,6 +74,8 @@ export type TimedEvent = { atSample: number } & (
       hi: number;
     }
   | { e: 'key'; key: FunctionKey }
+  /** Backward keyboard (task 17): a character typed on the terminal device. */
+  | { e: 'keyChar'; char: string }
 );
 
 export type WorkerError = ModemError | { kind: 'internal'; message: string };
@@ -83,4 +92,6 @@ export type FromWorker =
     }
   | { t: 'live'; events: TimedEvent[] }
   | { t: 'fileProgress'; done: number; total: number }
+  | { t: 'wavExport'; id: number; data: ArrayBuffer }
+  | { t: 'backAudio'; id: number; audio: Float32Array; sampleRate: number }
   | { t: 'error'; error: WorkerError };

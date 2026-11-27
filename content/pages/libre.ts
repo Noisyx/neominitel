@@ -45,7 +45,7 @@ export const LIBRE_ACCUEIL_PAGE: PageSource = {
       row: 8,
       col: 2,
       segments: [
-        { text: 'Fonctions prévues dans cet atelier :', fg: COLOURS.WHITE },
+        { text: 'L atelier s ouvre sous le Minitel :', fg: COLOURS.WHITE },
       ],
     },
     {

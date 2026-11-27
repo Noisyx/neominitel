@@ -76,10 +76,10 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Depends o
   - Static build, HTTPS host, bundle size check, manual checklist on two devices and every browser.
   - _Requirements: 13.2-13.3_
 
-- [ ] 16. 3615 LIBRE `[STRETCH]`
+- [x] 16. 3615 LIBRE `[STRETCH]`
   - Page editor with mosaic painting, send by sound, WAV export, share link in the URL fragment.
   - _Requirements: 11.1-11.2_
 
-- [ ] 17. Backward channel in the app `[STRETCH]`
+- [x] 17. Backward channel in the app `[STRETCH]`
   - Terminal sends keys at 75 baud; server device listens and drives the service.
   - _Requirements: 12.1_
