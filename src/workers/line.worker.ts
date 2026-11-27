@@ -118,6 +118,11 @@ workerScope.onmessage = (event: MessageEvent<ToWorker>): void => {
         break;
       }
 
+      case 'setRxChannel': {
+        engine.setRxChannel(msg.channel);
+        break;
+      }
+
       case 'capturePort': {
         detachCapturePort();
         engine.stopTransmit();

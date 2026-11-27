@@ -350,6 +350,7 @@ export function App(): ReactElement {
       [capture.workerPort],
     );
     postToWorker({ t: 'setThreshold', mode: stateRef.current.threshold });
+    postToWorker({ t: 'setRxChannel', channel: stateRef.current.rxChannel });
 
     dispatch({
       type: 'MIC_STARTED',
@@ -434,6 +435,7 @@ export function App(): ReactElement {
       lastStreamWasWavRef.current = true;
       const transferCopy = wavBytes.slice().buffer;
       postToWorker({ t: 'setThreshold', mode: stateRef.current.threshold });
+      postToWorker({ t: 'setRxChannel', channel: stateRef.current.rxChannel });
       postToWorker(
         {
           t: 'decodeFile',
@@ -548,6 +550,7 @@ export function App(): ReactElement {
           lastStreamWasWavRef.current = true;
           postToWorker({ t: 'stopTransmit' });
           postToWorker({ t: 'setThreshold', mode: stateRef.current.threshold });
+          postToWorker({ t: 'setRxChannel', channel: stateRef.current.rxChannel });
           postToWorker(
             {
               t: 'decodeFile',
@@ -583,6 +586,8 @@ export function App(): ReactElement {
       }
 
       postToWorker({ t: 'setThreshold', mode: stateRef.current.threshold });
+      // Pages modulated here are on the forward channel: decode them there whatever the toggle.
+      postToWorker({ t: 'setRxChannel', channel: 'forward' });
       postToWorker({ t: 'setSim', sim: stateRef.current.sim });
       postToWorker({
         t: 'transmit',
@@ -725,6 +730,16 @@ export function App(): ReactElement {
       stateRef.current.threshold === 'adaptive' ? 'fixed' : 'adaptive';
     postToWorker({ t: 'setThreshold', mode: nextMode });
     dispatch({ type: 'TOGGLE_THRESHOLD' });
+  }, [postToWorker]);
+
+  // "Écoute voie retour" (3615 FANTOME L5): applies to WAV and microphone input from the next
+  // start; locally transmitted pages are always decoded on the forward channel.
+  const handleToggleRxChannel = useCallback((): void => {
+    const next = stateRef.current.rxChannel === 'backward' ? 'forward' : 'backward';
+    if (lastStreamWasWavRef.current || stateRef.current.micState === 'on') {
+      postToWorker({ t: 'setRxChannel', channel: next });
+    }
+    dispatch({ type: 'TOGGLE_RX_CHANNEL' });
   }, [postToWorker]);
 
   const handleToggleVote = useCallback((): void => {
@@ -1201,6 +1216,8 @@ export function App(): ReactElement {
               onToggleVisible={handleToggleHudVisible}
               thresholdMode={state.threshold}
               onToggleThreshold={handleToggleThreshold}
+              rxChannel={state.rxChannel}
+              onToggleRxChannel={handleToggleRxChannel}
               voteOn={state.voteOn}
               onToggleVote={handleToggleVote}
               bufferRef={hudBufferRef}

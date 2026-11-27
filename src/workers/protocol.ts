@@ -1,4 +1,4 @@
-import type { DiagEvent, ModemError, QualityEvent } from '../modem';
+import type { ChannelId, DiagEvent, ModemError, QualityEvent } from '../modem';
 import type { Cell, FunctionKey, Screen } from '../videotex';
 
 export interface SimParams {
@@ -36,6 +36,8 @@ export type ToWorker =
   | { t: 'stopTransmit' }
   | { t: 'setSim'; sim: SimParams }
   | { t: 'setThreshold'; mode: 'fixed' | 'adaptive' }
+  /** Receive channel of the demodulator (3615 FANTOME L5, "Écoute voie retour"); default 'forward'. */
+  | { t: 'setRxChannel'; channel: ChannelId }
   | { t: 'capturePort'; port: MessagePort; sampleRate: number }
   | { t: 'stopCapture' }
   | { t: 'decodeFile'; id?: number; data: ArrayBuffer; realtime: boolean }

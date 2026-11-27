@@ -3,6 +3,7 @@ import {
   BerCounter,
   pn9Frames,
   readWav,
+  type ChannelId,
   type DemodEvent,
   type StreamingDemodulator,
 } from '../modem';
@@ -76,6 +77,11 @@ export interface LineEngine {
   stopTransmit(): void;
   setSim(sim: SimParams): void;
   setThreshold(mode: 'fixed' | 'adaptive'): void;
+  /**
+   * Receive channel of the demodulator (default 'forward'). A change recreates the demodulator;
+   * locally transmitted pages are always forward, so the app sets 'forward' before a transmit.
+   */
+  setRxChannel(channel: ChannelId): void;
   pushLiveCaptureChunk(chunk: Float32Array): Extract<FromWorker, { t: 'live' }> | null;
   reset(): void;
 }
@@ -114,6 +120,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
   let sampleRate = 48000;
   let simParams: SimParams = { ...DEFAULT_SIM_PARAMS };
   let thresholdMode: 'fixed' | 'adaptive' = 'fixed';
+  let rxChannel: ChannelId = 'forward';
 
   let demod: StreamingDemodulator | null = null;
   let simulator: StreamingSimulator | null = null;
@@ -145,14 +152,14 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
     const initialThreshold = thresholdMode === 'adaptive' ? 'adaptive' : 'fixed';
     let res = modem.createDemodulator({
       sampleRate,
-      channel: 'forward',
+      channel: rxChannel,
       threshold: initialThreshold,
     });
     if (!res.ok && initialThreshold === 'adaptive') {
       // Fallback before task 8 lands: initialize with 'fixed' and delegate setThresholdMode
       res = modem.createDemodulator({
         sampleRate,
-        channel: 'forward',
+        channel: rxChannel,
         threshold: 'fixed',
       });
       if (res.ok) {
@@ -848,6 +855,13 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
     setThreshold(mode: 'fixed' | 'adaptive'): void {
       thresholdMode = mode;
       demod?.setThresholdMode(mode);
+    },
+
+    setRxChannel(channel: ChannelId): void {
+      if (channel !== 'forward' && channel !== 'backward') return;
+      if (channel === rxChannel) return;
+      rxChannel = channel;
+      if (demod) createFreshDemodulator();
     },
 
     pushLiveCaptureChunk(

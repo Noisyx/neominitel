@@ -2133,3 +2133,45 @@ describe('neominitel-app Task 11.2: curve 4 on the BER chart', () => {
     expect(html).toContain('4 courbes affichées');
   });
 });
+
+describe('fantome Task 7 / neominitel-app: "Écoute voie retour" (backward receive channel)', () => {
+  function backwardPageWav(text: string, sampleRate: number): Uint8Array {
+    const page: PageSource = { id: 'test/voie-retour', rows: [{ row: 5, col: 2, segments: [{ text }] }] };
+    const enc = encodePage(page);
+    if (!enc.ok) throw new Error('encodePage');
+    const mod = modulate(enc.value.bytes, { sampleRate, channel: 'backward', tailIdleMs: 400 });
+    if (!mod.ok) throw new Error('modulate');
+    const wav = writeWav(mod.value, sampleRate);
+    if (!wav.ok) throw new Error('writeWav');
+    return wav.value;
+  }
+
+  function decodedText(engine: ReturnType<typeof createLineEngine>, wav: Uint8Array): string {
+    const res = engine.decodeWavFast(wav);
+    expect(res.t).toBe('live');
+    if (res.t !== 'live') return '';
+    let text = '';
+    for (const ev of res.events) if (ev.e === 'pageEnd') text += rowToText(ev.screen, 5);
+    return text;
+  }
+
+  it('the line engine decodes a backward-channel WAV only after setRxChannel("backward"), and goes back to forward on request', () => {
+    const fs = 16000;
+    const wav = backwardPageWav('LA VOIX DU RETOUR', fs);
+    const engine = createLineEngine();
+    expect(engine.init(fs)).toBeNull();
+    expect(decodedText(engine, wav)).not.toContain('LA VOIX DU RETOUR');
+    engine.setRxChannel('backward');
+    expect(decodedText(engine, wav)).toContain('LA VOIX DU RETOUR');
+    engine.setRxChannel('forward');
+    expect(decodedText(engine, wav)).not.toContain('LA VOIX DU RETOUR');
+  });
+
+  it('TOGGLE_RX_CHANNEL flips the receive channel (default forward)', () => {
+    const s0 = createInitialUiState(createBlankScreen());
+    expect(s0.rxChannel).toBe('forward');
+    const s1 = uiReducer(s0, { type: 'TOGGLE_RX_CHANNEL' });
+    expect(s1.rxChannel).toBe('backward');
+    expect(uiReducer(s1, { type: 'TOGGLE_RX_CHANNEL' }).rxChannel).toBe('forward');
+  });
+});

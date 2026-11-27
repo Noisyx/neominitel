@@ -66,6 +66,8 @@ export interface UiState {
   crtEnabled: boolean;
   sim: SimParams;
   threshold: 'fixed' | 'adaptive';
+  /** Receive channel for WAV and microphone input ("Écoute voie retour", 3615 FANTOME L5). */
+  rxChannel: 'forward' | 'backward';
   voteOn: boolean;
   votes: VoteStore;
   hudVisible: boolean;
@@ -104,6 +106,7 @@ export type UiAction =
   | { type: 'TOGGLE_CRT' }
   | { type: 'TOGGLE_HUD_VISIBLE' }
   | { type: 'TOGGLE_THRESHOLD' }
+  | { type: 'TOGGLE_RX_CHANNEL' }
   | { type: 'TOGGLE_VOTE' }
   | { type: 'SET_SIM'; sim: SimParams }
   | { type: 'CLEAR_BER_POINTS' }
@@ -200,6 +203,7 @@ export function createInitialUiState(standby: Screen): UiState {
     crtEnabled: true,
     sim: { ...DEFAULT_SIM_PARAMS },
     threshold: 'fixed',
+    rxChannel: 'forward',
     voteOn: true,
     votes: createEmptyVoteStore(),
     hudVisible: false,
@@ -692,6 +696,12 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
       return {
         ...state,
         threshold: state.threshold === 'adaptive' ? 'fixed' : 'adaptive',
+      };
+
+    case 'TOGGLE_RX_CHANNEL':
+      return {
+        ...state,
+        rxChannel: state.rxChannel === 'backward' ? 'forward' : 'backward',
       };
 
     case 'TOGGLE_VOTE': {

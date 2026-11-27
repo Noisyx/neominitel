@@ -33,6 +33,6 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Depends o
   - Property test H4 on `dist/` and `public/`.
   - _Requirements: 3.4_
 
-- [ ] 7. Level 5, La voix du retour `[STRETCH]`
+- [x] 7. Level 5, La voix du retour `[STRETCH]`
   - Needs `v23-modem` task 14. Decoy page, backward code page, "Écoute voie retour" toggle in the HUD.
   - _Requirements: 1.1_

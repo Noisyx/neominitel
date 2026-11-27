@@ -60,5 +60,21 @@
     },
     "feature": "vote",
     "seed": 4025
+  },
+  {
+    "id": "L5",
+    "title": "La voix du retour",
+    "storyPage": "fantome/story-l5",
+    "transmissionPage": "fantome/tx-l5",
+    "codeRow": 13,
+    "code": "Revenant",
+    "hint": "La page aiguë est un leurre : le vrai message passe sur la voie retour, à 75 bauds dans le grave (390 et 450 Hz). Activez « Écoute voie retour » dans le Math HUD puis relancez l'écoute, et patientez : la voix est lente.",
+    "damage": {
+      "kind": "backward",
+      "decoyPage": "fantome/decoy-l5",
+      "ebN0Db": 18
+    },
+    "feature": "backward",
+    "seed": 5001
   }
 ]

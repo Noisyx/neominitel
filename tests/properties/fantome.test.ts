@@ -75,8 +75,11 @@ describe('fantome Tasks 1, 2 & 3: Transmission pages, procedural drone, manifest
     const txPages = levels.map((lvl) =>
       buildTransmissionPage(lvl.transmissionPage, lvl.code, lvl.codeRow),
     );
-    const l5Page = buildTransmissionPage('fantome/tx-l5', 'Phantasme', 13);
-    const report = lintPages([...txPages, l5Page, FANTOME_DECOY_L5_PAGE]);
+    // L5 is in levels.json since fantome task 7; before that it was linted with a placeholder code.
+    const extra = levels.some((lvl) => lvl.transmissionPage === 'fantome/tx-l5')
+      ? []
+      : [buildTransmissionPage('fantome/tx-l5', 'Phantasme', 13)];
+    const report = lintPages([...txPages, ...extra, FANTOME_DECOY_L5_PAGE]);
     expect(report.issues).toEqual([]);
     expect(report.ok).toBe(true);
   });

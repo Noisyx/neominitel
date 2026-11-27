@@ -41,6 +41,16 @@
       "feature": "vote",
       "codeHash": "bfb10c4e3498c8268bca365c9c6cec3ac63268054d6ea87c5d1d30978f99d894",
       "seedUsed": 4025
+    },
+    {
+      "id": "L5",
+      "title": "La voix du retour",
+      "hint": "La page aiguë est un leurre : le vrai message passe sur la voie retour, à 75 bauds dans le grave (390 et 450 Hz). Activez « Écoute voie retour » dans le Math HUD puis relancez l'écoute, et patientez : la voix est lente.",
+      "storyPage": "fantome/story-l5",
+      "wav": "transmissions/L5.wav",
+      "feature": "backward",
+      "codeHash": "248f3d028276601d09edcfe85cbe7d559cd3c7e7af527fab8368e11670723828",
+      "seedUsed": 5001
     }
   ]
 }
