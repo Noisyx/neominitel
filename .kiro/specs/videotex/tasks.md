@@ -42,8 +42,9 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Property 
   - [x] 7.2 Colour and black-and-white palettes, mosaic block geometry, inverse and flash.
   - _Requirements: 10.1-10.3_
 
-- [ ] 8. Double height and width `[STRETCH]`
+- [x] 8. Double height and width `[STRETCH]`
   - Implement after verifying the direction of double height on a real Minitel reference.
+  - Done against the miedit emulator (upward double height, refused on row 1), not a real Minitel: design.md "Character size", property V14.
 
 - [x] 9. Image to mosaic `[STRETCH]` (mathematician)
   - Per-cell best colour pair, optional error diffusion; used by 3615 LIBRE.

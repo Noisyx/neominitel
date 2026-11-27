@@ -168,20 +168,28 @@ function imageToMosaic(img: RgbImage, cols: number, rows: number, o?: ImageMosai
 3. **Page mode only:** no scroll mode.
 4. **Skipped sequences:** PRO1-3 and CSI are skipped, not executed.
 5. **Error cells:** drawn as a hatched block. We do not claim this is the historical rendering.
-6. **Not implemented:** masking, DRCS (redefinable characters), double size before `[STRETCH]`.
+6. **Not implemented:** masking, DRCS (redefinable characters). Double size is implemented (task 8) following the miedit emulator; its direction was not checked on a real Minitel.
 
 ## Rendering model
 - Cell: 8 × 10 pixels; the screen is 320 × 250 pixels before scaling.
 - Mosaic blocks: columns of 4 + 4 pixels, rows of 3 + 4 + 3 pixels. Disjoint blocks leave a 1-pixel gap on the right and bottom.
 - Inverse swaps fg and bg (G0 only). Flash: hidden for 1/3 of a 1 s period, unless `prefers-reduced-motion`.
-- Double height draws the glyph scaled ×2 vertically over the current row and the row above **(verify)** `[STRETCH]`.
+- Double height draws the glyph scaled ×2 vertically over the current row and the row above. Checked against the miedit emulator (F. Bisson, `library/minitel/decoder.js`), **not on a real Minitel**.
+
+### Character size (task 8)
+- Cell field `part?: { x: 0 | 1; y: 0 | 1 }`: which part of an enlarged character the cell shows (x: left / right half, y: top / bottom half); absent for normal size. `cellsEqual` and the vote compare it. The origin cell (`isCharacterOrigin`) is the bottom-left part, where the cursor was.
+- Decoder: a G0 / G2 character with double width fills 2 columns; with double height its top half goes on the row above the cursor. Parts outside the page (column 41, above row 1) are dropped. The cursor moves by the width; past column 40 it goes to column 1, down by the height (page mode, row 24 continues on row 1). Error bytes and REP follow the same geometry.
+- Refused size codes (as miedit): any size code in G1 (mosaics are never enlarged) and on the status row; a size with double height on row 1. SO and SI return to normal size.
+- Rendering: nearest-neighbour ×2 of the 8 × 10 glyph (`scaleGlyphPart`), underline included.
+- Encoder: a double-width segment counts 2 columns per glyph. Double height needs a free row above (not row 1, no text row or mosaic on row r − 1); otherwise it is drawn at normal height with a warning. The row above is sent empty and the top halves are drawn by the bytes of row r, which come later. Right halves send no byte. After SO / SI the encoder sends the size again. A row that ends enlarged is followed by ESC 0x4C (normal size), so that a corrupted US on the next row does not print that row's characters enlarged. A lost US on a double-height row itself still reaches r−2 (V3).
+- Not handled: double size inside the status row, and the "delimiter" behaviour of enlarged spaces for background colour (Deviation 1 applies as for normal size).
 
 ## Correctness properties
 | ID | Property |
 |---|---|
 | V1 | Round-trip: for any valid PageSource (text from the supported alphabet with accents, colours, mosaics), decoding encodePage(p) gives the screen expected for p, cell by cell. |
 | V2 | Byte-by-byte decoding and one-shot decoding give the same screen. |
-| V3 | Locality: replacing any single byte except the first (FF) with an error-flagged byte changes cells only in rows r−1, r and r+1, where r is the row being written. |
+| V3 | Locality: replacing any single byte except the first (FF) with an error-flagged byte changes cells only in rows r−1, r and r+1, where r is the row being written; r−2 to r+2 when row r holds double-height characters (task 8: if its US is lost, they print one row early and their top halves reach r−2; a wrap moves down 2 rows). |
 | V4 | REP: encoding with and without REP gives the same screen. |
 | V5 | Mosaic: for every 6-bit pattern, the G1 code is in 0x20-0x3F ∪ 0x60-0x7F and decodes back to the same pattern. |
 | V6 | Robustness: for any byte sequence (0-127, random error flags), the decoder never throws and the cursor stays inside the screen. |
@@ -191,6 +199,7 @@ function imageToMosaic(img: RgbImage, cols: number, rows: number, o?: ImageMosai
 | V10 | Incremental vote equals batch vote for any order of the receptions. |
 | V11 | Keys: decodeKey(encodeKey(k)) = k for the nine function keys. |
 | V12 `[STRETCH]` | Image to mosaic optimality: without diffusion, every cell's squared error equals the error of its reported colours and blocks and is ≤ that of every single colour and every pair of the palette. |
+| V14 `[STRETCH]` | Character size: double width fills 2 columns and moves the cursor by 2; double height fills the cursor cell and the cell above; size codes are ignored in G1, on the status row and (with double height) on row 1; SO / SI reset the size; the parts of an enlarged character tile its glyph scaled ×2. |
 | V13 `[STRETCH]` | Image to mosaic round trip: an image with at most two palette colours per cell gives total error 0 (with or without diffusion), and decoding encodePage of its `sources` gives, cell by cell, the chosen G1 code, fg and bg. |
 
 ## Error handling

@@ -244,6 +244,8 @@ describe('Videotex Task 3: Golden decoder tests', () => {
     ]);
 
     let s = dec.screen();
+    // The cursor is on row 1 after FF: a size with double height has no row above there and is
+    // ignored (videotex task 8, design.md "Character size"), so the 5 'M' are normal size.
     for (let c = 0; c < 5; c++) {
       expect(s.rows[1][c]).toEqual({
         code: 0x4d,
@@ -253,8 +255,8 @@ describe('Videotex Task 3: Golden decoder tests', () => {
         flash: true,
         inverse: true,
         disjoint: false,
-        doubleHeight: true,
-        doubleWidth: true,
+        doubleHeight: false,
+        doubleWidth: false,
         error: false,
       });
     }
@@ -612,8 +614,10 @@ describe('Videotex Property Tests', () => {
             let activeBg: number = COLOURS.BLACK;
             const segments: Segment[] = [];
             for (const s of rawSegs) {
-              if (remaining <= 0) break;
-              const take = Math.min(s.len, remaining);
+              // A double-width character takes two columns (videotex task 8).
+              const w = s.size === 'doubleWidth' || s.size === 'double' ? 2 : 1;
+              if (remaining < w) break;
+              const take = Math.min(s.len, Math.floor(remaining / w));
               let text = s.chars.slice(0, take).join('');
               // Ensure background transition starts with a space delimiter (Req 4.4)
               if (s.bg !== activeBg) {
@@ -628,7 +632,7 @@ describe('Videotex Property Tests', () => {
                 inverse: s.inverse,
                 size: s.size,
               });
-              remaining -= text.length;
+              remaining -= text.length * w;
             }
             return { row: rowNum, col, segments };
           });
@@ -638,8 +642,15 @@ describe('Videotex Property Tests', () => {
           ? fc.constant<PageRowSource[]>([])
           : fc.tuple(...base.rowNumbers.map(arbRowEntry));
 
-      return rowsArb.map((rows) => {
-        const occupiedRows = new Set(rows.map((r) => r.row));
+      return rowsArb.map((generatedRows) => {
+        // Copies: the size downgrade below must not mutate values fast-check may reuse.
+        const rows = generatedRows.map((r) => ({ ...r, segments: r.segments.map((s) => ({ ...s })) }));
+        const textRows = new Set(rows.map((r) => r.row));
+        const hasHeight = (r: PageRowSource): boolean =>
+          r.segments.some((s) => s.size === 'doubleHeight' || s.size === 'double');
+        // Rows a mosaic must avoid: text rows and the row above a double-height row (top halves).
+        const occupiedRows = new Set(textRows);
+        for (const r of rows) if (hasHeight(r)) occupiedRows.add(r.row - 1);
         const mosaics: MosaicSource[] = [];
         if (base.hasMosaic) {
           const hCells = base.mosaicCellRows;
@@ -666,6 +677,18 @@ describe('Videotex Property Tests', () => {
               fg: base.mosaicFg,
               bg: base.mosaicBg,
             });
+          }
+        }
+
+        // Double height needs a free row above (not row 1, no text there): otherwise the encoder
+        // draws it at normal height with a warning, so such segments are generated without it.
+        const mosaicRows = new Set<number>();
+        for (const m of mosaics) for (let k = 0; k < m.bitmap.length / 3; k++) mosaicRows.add(m.row + k);
+        for (const r of rows) {
+          if (r.row > 1 && !textRows.has(r.row - 1) && !mosaicRows.has(r.row - 1)) continue;
+          for (const s of r.segments) {
+            if (s.size === 'doubleHeight') s.size = 'normal';
+            if (s.size === 'double') s.size = 'doubleWidth';
           }
         }
 
@@ -699,7 +722,13 @@ describe('Videotex Property Tests', () => {
           expect(rowToText(decoded, 0).slice(0, page.status.length)).toBe(page.status);
         }
         for (const rSpec of page.rows) {
-          const joined = rSpec.segments.map((s) => s.text).join('');
+          // A double-width character shows on two cells (both halves carry its code).
+          const joined = rSpec.segments
+            .map((s) => {
+              const w = s.size === 'doubleWidth' || s.size === 'double' ? 2 : 1;
+              return [...s.text].map((ch) => ch.repeat(w)).join('');
+            })
+            .join('');
           const start = (rSpec.col ?? 1) - 1;
           expect(rowToText(decoded, rSpec.row).slice(start, start + joined.length)).toBe(
             joined,
@@ -795,6 +824,14 @@ describe('Videotex Property Tests', () => {
 
           const cleanScreen = decodeBytes(bytes);
           const byteRows = rowForByteOffsets(bytes);
+          // Rows sending double-height characters (videotex task 8): if such a row's US is lost,
+          // its characters print one row early and their top halves land on r-2; a wrap moves
+          // down 2 rows. The window is r-2..r+2 for those rows.
+          const tallRows = new Set<number>();
+          for (let row = 2; row <= 24; row++) {
+            if (cleanScreen.rows[row].some((cell) => cell.doubleHeight && cell.part?.y === 1)) tallRows.add(row);
+          }
+          const pageRowOffset = (row: number, k: number): number => ((row - 1 + k + 48) % 24) + 1;
 
           // Always test every US introducer + sampled interior bytes
           const indicesToTest = new Set<number>();
@@ -815,6 +852,10 @@ describe('Videotex Property Tests', () => {
             const damagedScreen = decodeBytes(rxStream);
             const r = byteRows[errIndex];
             const allowed = allowedNeighbourRows(r);
+            if (tallRows.has(r)) {
+              allowed.add(pageRowOffset(r, -2));
+              allowed.add(pageRowOffset(r, 2));
+            }
             const diffRows = changedRowIndices(damagedScreen, cleanScreen);
             for (const changedRow of diffRows) {
               expect(allowed.has(changedRow)).toBe(true);
@@ -1308,5 +1349,133 @@ describe('Videotex Task 9: image to mosaic', () => {
       if (!r.ok) expect(r.error.kind).toBe('bad-bitmap');
     }
     expect(imageToMosaic({ width: 2, height: 3, data: new Uint8Array(5) }, 1, 1).ok).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Task 8: double height and width (design.md "Character size")
+
+describe('Videotex Task 8: character size', () => {
+  const at = (row: number, col: number): number[] => [C0.US, 0x40 + row, 0x40 + col];
+  const esc = (code: number): number[] => [C0.ESC, code];
+
+  it('V14 character size: double width fills 2 columns, double height extends upward, the cursor moves by the width', () => {
+    const dec = createVideotexDecoder();
+    dec.pushMany([C0.FF, ...at(5, 1), ...esc(ESC_CODES.SIZE_DOUBLE_WIDTH), 0x41, 0x42]);
+    let s = dec.screen();
+    expect(s.rows[5][0]).toMatchObject({ code: 0x41, doubleWidth: true, part: { x: 0, y: 0 } });
+    expect(s.rows[5][1]).toMatchObject({ code: 0x41, doubleWidth: true, part: { x: 1, y: 0 } });
+    expect(s.rows[5][2]).toMatchObject({ code: 0x42, part: { x: 0, y: 0 } });
+    expect(s.rows[5][3]).toMatchObject({ code: 0x42, part: { x: 1, y: 0 } });
+    expect(s.cursor.col).toBe(4);
+    expect(s.rows[4][0].code).toBe(0x20); // double width alone: no top half
+
+    dec.pushMany([...at(8, 10), ...esc(ESC_CODES.SIZE_DOUBLE_HEIGHT), 0x43]);
+    s = dec.screen();
+    expect(s.rows[8][9]).toMatchObject({ code: 0x43, doubleHeight: true, part: { x: 0, y: 1 } });
+    expect(s.rows[7][9]).toMatchObject({ code: 0x43, doubleHeight: true, part: { x: 0, y: 0 } });
+    expect(s.cursor).toMatchObject({ row: 8, col: 10 });
+
+    dec.pushMany([...at(12, 20), ...esc(ESC_CODES.SIZE_DOUBLE), 0x44]);
+    s = dec.screen();
+    expect(s.rows[12][19].part).toEqual({ x: 0, y: 1 });
+    expect(s.rows[12][20].part).toEqual({ x: 1, y: 1 });
+    expect(s.rows[11][19].part).toEqual({ x: 0, y: 0 });
+    expect(s.rows[11][20].part).toEqual({ x: 1, y: 0 });
+    expect([s.rows[11][19], s.rows[11][20], s.rows[12][19], s.rows[12][20]].every((c) => c.code === 0x44 && c.doubleHeight && c.doubleWidth)).toBe(true);
+    expect(s.cursor).toMatchObject({ row: 12, col: 21 });
+  });
+
+  it('size codes are ignored in G1, on the status row, and with double height on row 1; SO / SI return to normal size', () => {
+    const dec = createVideotexDecoder();
+    dec.pushMany([C0.FF, ...at(1, 1), ...esc(ESC_CODES.SIZE_DOUBLE), 0x41]);
+    expect(dec.screen().rows[1][0]).toMatchObject({ doubleHeight: false, doubleWidth: false });
+    dec.pushMany([...esc(ESC_CODES.SIZE_DOUBLE_WIDTH), 0x42]); // width only is fine on row 1
+    expect(dec.screen().rows[1][1]).toMatchObject({ code: 0x42, doubleWidth: true, part: { x: 0, y: 0 } });
+
+    dec.pushMany([...at(6, 1), C0.SO, ...esc(ESC_CODES.SIZE_DOUBLE), 0x7f]);
+    expect(dec.screen().rows[6][0]).toMatchObject({ set: 'G1', doubleHeight: false, doubleWidth: false });
+    expect(dec.screen().rows[6][0].part).toBeUndefined();
+
+    dec.pushMany([...at(9, 1), ...esc(ESC_CODES.SIZE_DOUBLE_WIDTH), C0.SO, C0.SI, 0x41]);
+    expect(dec.screen().rows[9][0]).toMatchObject({ doubleWidth: false });
+
+    dec.pushMany([...at(0, 1), ...esc(ESC_CODES.SIZE_DOUBLE_WIDTH), 0x41]);
+    expect(dec.screen().rows[0][0]).toMatchObject({ doubleWidth: false });
+  });
+
+  it('wrap: a double-width character in column 40 loses its right half; past column 40 the cursor goes down by the height', () => {
+    const dec = createVideotexDecoder();
+    dec.pushMany([C0.FF, ...at(5, 40), ...esc(ESC_CODES.SIZE_DOUBLE_WIDTH), 0x41]);
+    let s = dec.screen();
+    expect(s.rows[5][39]).toMatchObject({ code: 0x41, part: { x: 0, y: 0 } });
+    expect(s.cursor).toMatchObject({ row: 6, col: 0 });
+    dec.pushMany([...at(10, 39), ...esc(ESC_CODES.SIZE_DOUBLE), 0x42]);
+    s = dec.screen();
+    expect(s.cursor).toMatchObject({ row: 12, col: 0 });
+    dec.pushMany([...at(24, 39), ...esc(ESC_CODES.SIZE_DOUBLE), 0x43]);
+    expect(dec.screen().cursor).toMatchObject({ row: 2, col: 0 }); // 24 -> 1 -> 2 (page mode)
+  });
+
+  it('rendering: the parts of an enlarged character tile the glyph scaled x2, for every printable code and size', () => {
+    for (let code = 0x21; code <= 0x7e; code++) {
+      const glyph = resolveCellRender(createBlankCell({ code })).bitmap;
+      for (const [w, h] of [[2, 1], [1, 2], [2, 2]] as const) {
+        for (let py = 0; py < h; py++) {
+          for (let px = 0; px < w; px++) {
+            const cell = createBlankCell({ code, doubleWidth: w === 2, doubleHeight: h === 2, part: { x: px as 0 | 1, y: py as 0 | 1 } });
+            const bmp = resolveCellRender(cell).bitmap;
+            for (let y = 0; y < 10; y++) {
+              for (let x = 0; x < 8; x++) {
+                const gy = Math.floor((y + py * 10) / h);
+                const gx = Math.floor((x + px * 8) / w);
+                const want = (glyph[gy] & (0x80 >> gx)) !== 0;
+                const got = (bmp[y] & (0x80 >> x)) !== 0;
+                if (want !== got) throw new Error(`code ${code} size ${w}x${h} part ${px},${py} pixel ${x},${y}`);
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('round trip: a page with enlarged text decodes to the screen of buildPageScreen; double height on row 1 or under a used row is drawn normal with a warning', () => {
+    const page: PageSource = {
+      id: 'test/sizes',
+      rows: [
+        { row: 3, col: 2, segments: [{ text: 'TITRE', size: 'double', fg: 3 }, { text: ' fin', fg: 7 }] },
+        { row: 6, col: 1, segments: [{ text: 'LARGE', size: 'doubleWidth', bg: 0 }] },
+        { row: 9, col: 5, segments: [{ text: 'HAUT', size: 'doubleHeight', fg: 6 }] },
+        { row: 24, col: 21, segments: [{ text: 'BASDEPAGE!', size: 'double' }] },
+      ],
+    };
+    const built = buildPageScreen(page);
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    expect(built.value.warnings).toEqual([]);
+    const enc = encodePage(page);
+    expect(enc.ok).toBe(true);
+    if (!enc.ok) return;
+    expect(screensEqual(decodeBytes(enc.value.bytes), built.value.screen)).toBe(true);
+    const noRep = encodePage(page, { useRep: false });
+    expect(noRep.ok && screensEqual(decodeBytes(noRep.value.bytes), built.value.screen)).toBe(true);
+    expect(rowToText(built.value.screen, 2).slice(1, 11)).toBe('TTIITTRREE'); // top halves
+    expect(rowToText(built.value.screen, 3).slice(1, 15)).toBe('TTIITTRREE fin');
+
+    const bad = buildPageScreen({
+      id: 'test/bad-sizes',
+      rows: [
+        { row: 1, segments: [{ text: 'UN', size: 'doubleHeight' }] },
+        { row: 5, segments: [{ text: 'X' }] },
+        { row: 6, segments: [{ text: 'Y', size: 'double' }] },
+      ],
+    });
+    expect(bad.ok).toBe(true);
+    if (!bad.ok) return;
+    expect(bad.value.warnings).toHaveLength(2);
+    expect(bad.value.screen.rows[1][0]).toMatchObject({ doubleHeight: false });
+    expect(bad.value.screen.rows[6][0]).toMatchObject({ doubleHeight: false, doubleWidth: true });
+    expect(rowToText(bad.value.screen, 5).startsWith('X')).toBe(true);
   });
 });

@@ -14,9 +14,33 @@ export interface Cell {
   doubleHeight: boolean;
   doubleWidth: boolean;
   error: boolean;
+  /**
+   * Which part of an enlarged character this cell shows (videotex task 8): x = 0 left / 1 right
+   * half (double width), y = 0 top / 1 bottom half (double height). Absent for a normal-size cell.
+   */
+  part?: CellPart;
 }
 
-export type SerialAttributes = Omit<Cell, 'code' | 'accent' | 'error'>;
+export interface CellPart {
+  x: 0 | 1;
+  y: 0 | 1;
+}
+
+export type SerialAttributes = Omit<Cell, 'code' | 'accent' | 'error' | 'part'>;
+
+/** Part index for comparisons: -1 when absent. */
+function partKey(cell: Cell): number {
+  return cell.part ? cell.part.x * 2 + cell.part.y : -1;
+}
+
+/**
+ * True for the cell that carries an enlarged character's byte: its bottom-left part, where the
+ * cursor was when the character was printed (or any normal-size cell).
+ */
+export function isCharacterOrigin(cell: Cell): boolean {
+  if (!cell.part) return true;
+  return cell.part.x === 0 && cell.part.y === (cell.doubleHeight ? 1 : 0);
+}
 
 export interface CursorState {
   /** 0-indexed row in 0..24 (0 = status row, 1..24 = page rows). */
@@ -97,6 +121,9 @@ export function cloneCell(cell: Cell): Cell {
   if (cell.accent !== undefined) {
     copy.accent = cell.accent;
   }
+  if (cell.part !== undefined) {
+    copy.part = { x: cell.part.x, y: cell.part.y };
+  }
   return copy;
 }
 
@@ -122,7 +149,8 @@ export function cellsEqual(a: Cell, b: Cell, ignoreError = false): boolean {
     a.inverse === b.inverse &&
     a.disjoint === b.disjoint &&
     a.doubleHeight === b.doubleHeight &&
-    a.doubleWidth === b.doubleWidth
+    a.doubleWidth === b.doubleWidth &&
+    partKey(a) === partKey(b)
   );
 }
 
@@ -183,6 +211,7 @@ export function serializeCellKey(cell: Cell, ignoreError = true): string {
     cell.doubleHeight ? 1 : 0,
     cell.doubleWidth ? 1 : 0,
     ignoreError ? 0 : cell.error ? 1 : 0,
+    partKey(cell),
   ].join(':');
 }
 
