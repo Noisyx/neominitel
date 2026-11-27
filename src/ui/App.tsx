@@ -25,7 +25,8 @@ import {
   type ServiceId,
   type ServiceOutput,
 } from '../services';
-import type { FunctionKey } from '../videotex';
+import { encodeKey, type FunctionKey } from '../videotex';
+import { backwardBytesForChar } from '../workers/back-keys';
 import type {
   FromWorker,
   SimParams,
@@ -63,6 +64,8 @@ import {
 } from './screens/previewPages';
 import { SimControls } from './screens/SimControls';
 import { StartScreen } from './screens/StartScreen';
+import { LibreEditor } from './screens/LibreEditor';
+import { LIBRE_PAGE_ID, decodeShareFragment } from '../services/libre-editor';
 import {
   FunctionKeys,
   mapKeyboardEventToMinitel,
@@ -92,6 +95,11 @@ export function App(): ReactElement {
 
   const playerRef = useRef<GaplessPlayer | null>(null);
   const micCaptureRef = useRef<ActiveMicCapture | null>(null);
+  // Backward keyboard (task 17): server-side microphone, terminal-side playback cursor, and the
+  // handler that applies a received key or character (set once the router handlers exist).
+  const backCaptureRef = useRef<ActiveMicCapture | null>(null);
+  const backAudioCursorRef = useRef<number>(0);
+  const backInputRef = useRef<((ev: TimedEvent) => void) | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const workerInitializedRef = useRef<boolean>(false);
   const lastStreamWasWavRef = useRef<boolean>(false);
@@ -167,6 +175,13 @@ export function App(): ReactElement {
 
         case 'live': {
           const currentMode = stateRef.current.mode;
+          if (currentMode === 'Serveur') {
+            // Backward keyboard: keys and characters sent by the terminal device.
+            for (const ev of msg.events) {
+              if (ev.e === 'key' || ev.e === 'keyChar') backInputRef.current?.(ev);
+            }
+            return;
+          }
           if (currentMode !== 'Ecoute' && currentMode !== 'Fichier') {
             return;
           }
@@ -215,6 +230,32 @@ export function App(): ReactElement {
             total: msg.total,
           });
           break;
+
+        case 'backAudio': {
+          // Backward keyboard, terminal side: play the 75 baud burst, queued after the previous one.
+          const player = playerRef.current;
+          if (!player) break;
+          if (player.currentSample() >= backAudioCursorRef.current) {
+            player.stopAll();
+            backAudioCursorRef.current = 0;
+          }
+          player.scheduleBlock({ id: msg.id, audio: msg.audio, startSample: backAudioCursorRef.current, sampleRate: msg.sampleRate });
+          backAudioCursorRef.current += msg.audio.length;
+          break;
+        }
+
+        case 'wavExport': {
+          // 3615 LIBRE: download the WAV built by the worker.
+          const url = URL.createObjectURL(new Blob([msg.data], { type: 'audio/wav' }));
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = 'neominitel-libre.wav';
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 10_000);
+          break;
+        }
       }
     };
 
@@ -350,6 +391,7 @@ export function App(): ReactElement {
       [capture.workerPort],
     );
     postToWorker({ t: 'setThreshold', mode: stateRef.current.threshold });
+    postToWorker({ t: 'setRxChannel', channel: stateRef.current.rxChannel });
 
     dispatch({
       type: 'MIC_STARTED',
@@ -434,6 +476,7 @@ export function App(): ReactElement {
       lastStreamWasWavRef.current = true;
       const transferCopy = wavBytes.slice().buffer;
       postToWorker({ t: 'setThreshold', mode: stateRef.current.threshold });
+      postToWorker({ t: 'setRxChannel', channel: stateRef.current.rxChannel });
       postToWorker(
         {
           t: 'decodeFile',
@@ -548,6 +591,7 @@ export function App(): ReactElement {
           lastStreamWasWavRef.current = true;
           postToWorker({ t: 'stopTransmit' });
           postToWorker({ t: 'setThreshold', mode: stateRef.current.threshold });
+          postToWorker({ t: 'setRxChannel', channel: stateRef.current.rxChannel });
           postToWorker(
             {
               t: 'decodeFile',
@@ -583,6 +627,8 @@ export function App(): ReactElement {
       }
 
       postToWorker({ t: 'setThreshold', mode: stateRef.current.threshold });
+      // Pages modulated here are on the forward channel: decode them there whatever the toggle.
+      postToWorker({ t: 'setRxChannel', channel: 'forward' });
       postToWorker({ t: 'setSim', sim: stateRef.current.sim });
       postToWorker({
         t: 'transmit',
@@ -612,6 +658,19 @@ export function App(): ReactElement {
       playerRef.current?.setMuted(false);
     }
     playerRef.current?.unlockFromGesture();
+    // 3615 LIBRE share link (#libre=...): the session opens on the shared page instead of SOMMAIRE.
+    const shared = typeof window !== 'undefined' ? decodeShareFragment(window.location.hash) : null;
+    if (shared) {
+      const [libreState] = getServiceById('LIBRE').init();
+      const output: ServiceOutput = { pageId: LIBRE_PAGE_ID, bytes: shared };
+      dispatch({
+        type: 'BEGIN_SESSION',
+        router: { activeServiceId: 'LIBRE', serviceState: libreState, lastOutput: output, inputBuffer: '' },
+        unmuteSpeaker: isServerMode,
+      });
+      await transmitServiceOutput(output, true);
+      return;
+    }
     const { state: nextRouter, effect } = connectRouter();
     dispatch({
       type: 'BEGIN_SESSION',
@@ -622,6 +681,28 @@ export function App(): ReactElement {
       await transmitServiceOutput(effect.output, effect.withConnectionSequence);
     }
   }, [transmitServiceOutput]);
+
+  // 3615 LIBRE editor: send the composed page by sound (same path as a service page).
+  const handleLibreSend = useCallback(
+    (bytes: Uint8Array): void => {
+      const current = stateRef.current.router;
+      if (!current || current.activeServiceId !== 'LIBRE') return;
+      playerRef.current?.unlockFromGesture();
+      const output: ServiceOutput = { pageId: LIBRE_PAGE_ID, bytes };
+      dispatch({ type: 'UPDATE_ROUTER_FOR_TRANSMIT', router: { ...current, lastOutput: output } });
+      void transmitServiceOutput(output, false);
+    },
+    [transmitServiceOutput],
+  );
+
+  const handleLibreExportWav = useCallback(
+    (bytes: Uint8Array): void => {
+      const worker = workerRef.current ?? spawnLineWorker();
+      if (!worker) return;
+      postToWorker({ t: 'exportWav', id: txIdRef.current, bytes: bytes.slice() });
+    },
+    [postToWorker, spawnLineWorker],
+  );
 
   const applyRouterOutcome = useCallback(
     (nextRouter: RouterState | null, effect: RouterEffect): void => {
@@ -668,6 +749,21 @@ export function App(): ReactElement {
     [transmitServiceOutput],
   );
 
+  // Backward keyboard, terminal side: the worker modulates the bytes at 75 baud ('backAudio').
+  const sendBackward = useCallback(
+    (bytes: Uint8Array): void => {
+      if (bytes.length === 0) return;
+      const player = playerRef.current;
+      if (!player) return;
+      player.unlockFromGesture();
+      void player.ensureStarted().then((sampleRate) => {
+        if (!workerRef.current && !spawnLineWorker()) return;
+        postToWorker({ t: 'sendBackward', id: txIdRef.current, bytes: bytes.slice(), sampleRate });
+      });
+    },
+    [postToWorker, spawnLineWorker],
+  );
+
   const handleFunctionKey = useCallback(
     (key: FunctionKey): void => {
       const current = stateRef.current;
@@ -678,6 +774,8 @@ export function App(): ReactElement {
           } else {
             void startEcouteMicrophone();
           }
+        } else if (current.backKeys && current.micState === 'on') {
+          sendBackward(encodeKey(key));
         }
         return;
       }
@@ -695,8 +793,69 @@ export function App(): ReactElement {
       const { state: nextRouter, effect } = stepRouterKey(current.router, key);
       applyRouterOutcome(nextRouter, effect);
     },
-    [applyRouterOutcome, handleConnect, handleDisconnect, startEcouteMicrophone],
+    [applyRouterOutcome, handleConnect, handleDisconnect, sendBackward, startEcouteMicrophone],
   );
+
+  // Backward keyboard, server side: a key or character received from the terminal device acts
+  // exactly like a local key press or keystroke.
+  useEffect(() => {
+    backInputRef.current = (ev: TimedEvent): void => {
+      const current = stateRef.current;
+      if (current.mode !== 'Serveur' || !current.backKeys) return;
+      if (ev.e === 'key') {
+        handleFunctionKey(ev.key);
+      } else if (ev.e === 'keyChar' && current.session === 'online' && current.router?.lastOutput.input) {
+        const { state: nextRouter, effect } = stepRouterChar(current.router, ev.char);
+        applyRouterOutcome(nextRouter, effect);
+      }
+    };
+  }, [applyRouterOutcome, handleFunctionKey]);
+
+  // Backward keyboard, server side: listen on the microphone while the toggle is on in Serveur.
+  useEffect(() => {
+    const wanted = state.mode === 'Serveur' && state.backKeys && state.session !== 'start';
+    if (!wanted) {
+      if (backCaptureRef.current) {
+        backCaptureRef.current.stop();
+        backCaptureRef.current = null;
+        postToWorker({ t: 'stopBackCapture' });
+      }
+      return;
+    }
+    if (backCaptureRef.current) return;
+    let cancelled = false;
+    void startMicrophoneCapture().then((res) => {
+      if (cancelled) {
+        if (res.ok) res.value.stop();
+        return;
+      }
+      if (!res.ok) {
+        dispatch({ type: 'BACK_KEYS_FAILED', message: res.error.message });
+        return;
+      }
+      if (!workerRef.current && !spawnLineWorker()) {
+        res.value.stop();
+        return;
+      }
+      backCaptureRef.current = res.value;
+      postToWorker({ t: 'backCapturePort', port: res.value.workerPort, sampleRate: res.value.sampleRate }, [res.value.workerPort]);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [state.mode, state.backKeys, state.session, postToWorker, spawnLineWorker]);
+
+  const handleToggleBackKeys = useCallback((): void => {
+    const current = stateRef.current;
+    if (!current.backKeys && current.mode === 'Ecoute') {
+      playerRef.current?.unlockFromGesture();
+      if (current.muted) {
+        playerRef.current?.setMuted(false);
+        dispatch({ type: 'TOGGLE_MUTE' });
+      }
+    }
+    dispatch({ type: 'TOGGLE_BACK_KEYS' });
+  }, []);
 
   const handleSetInputText = useCallback(
     (rawText: string): void => {
@@ -725,6 +884,16 @@ export function App(): ReactElement {
       stateRef.current.threshold === 'adaptive' ? 'fixed' : 'adaptive';
     postToWorker({ t: 'setThreshold', mode: nextMode });
     dispatch({ type: 'TOGGLE_THRESHOLD' });
+  }, [postToWorker]);
+
+  // "Écoute voie retour" (3615 FANTOME L5): applies to WAV and microphone input from the next
+  // start; locally transmitted pages are always decoded on the forward channel.
+  const handleToggleRxChannel = useCallback((): void => {
+    const next = stateRef.current.rxChannel === 'backward' ? 'forward' : 'backward';
+    if (lastStreamWasWavRef.current || stateRef.current.micState === 'on') {
+      postToWorker({ t: 'setRxChannel', channel: next });
+    }
+    dispatch({ type: 'TOGGLE_RX_CHANNEL' });
   }, [postToWorker]);
 
   const handleToggleVote = useCallback((): void => {
@@ -850,6 +1019,12 @@ export function App(): ReactElement {
       }
 
       const current = stateRef.current;
+      if (current.mode === 'Ecoute' && current.backKeys && current.micState === 'on') {
+        // Backward keyboard: a real Minitel sends every typed character on the backward channel.
+        event.preventDefault();
+        sendBackward(backwardBytesForChar(mapped.char));
+        return;
+      }
       if (
         (current.mode === 'Seul' || current.mode === 'Serveur') &&
         current.session === 'online' &&
@@ -867,7 +1042,7 @@ export function App(): ReactElement {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [applyRouterOutcome, handleFunctionKey]);
+  }, [applyRouterOutcome, handleFunctionKey, sendBackward]);
 
   const currentField = activeInputSpec(state.router);
   const serviceBadge = state.router
@@ -1022,6 +1197,26 @@ export function App(): ReactElement {
                   />
                   <span>Accord auto</span>
                 </button>
+                {(state.mode === 'Ecoute' || state.mode === 'Serveur') && (
+                  <button
+                    type="button"
+                    className="nm-chin-switch"
+                    aria-pressed={state.backKeys}
+                    title={
+                      state.mode === 'Ecoute'
+                        ? `Envoie vos touches au serveur par le son, à ${CHANNELS.backward.baud} bauds`
+                        : `Écoute au micro les touches envoyées par le terminal, à ${CHANNELS.backward.baud} bauds`
+                    }
+                    onClick={handleToggleBackKeys}
+                  >
+                    <span
+                      className="nm-chin-dot"
+                      data-active={state.backKeys ? 'true' : 'false'}
+                      aria-hidden="true"
+                    />
+                    <span>Clavier voie retour</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   className="nm-chin-switch"
@@ -1195,12 +1390,18 @@ export function App(): ReactElement {
             </div>
           </MinitelShell>
 
+          {state.router?.activeServiceId === 'LIBRE' && state.session !== 'start' && (
+            <LibreEditor onSend={handleLibreSend} onExportWav={handleLibreExportWav} />
+          )}
+
           {state.hudVisible && (
             <MathHud
               visible={state.hudVisible}
               onToggleVisible={handleToggleHudVisible}
               thresholdMode={state.threshold}
               onToggleThreshold={handleToggleThreshold}
+              rxChannel={state.rxChannel}
+              onToggleRxChannel={handleToggleRxChannel}
               voteOn={state.voteOn}
               onToggleVote={handleToggleVote}
               bufferRef={hudBufferRef}

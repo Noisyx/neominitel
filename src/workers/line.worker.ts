@@ -52,6 +52,19 @@ function pumpTransmitBlocks(): void {
   }
 }
 
+// Backward keyboard, server side (task 17): a second microphone port, independent of the forward
+// capture and of transmissions.
+let backCapturePort: MessagePort | null = null;
+
+function detachBackCapturePort(): void {
+  if (backCapturePort) {
+    backCapturePort.onmessage = null;
+    backCapturePort.close();
+    backCapturePort = null;
+  }
+  engine.stopBackwardKeys();
+}
+
 function detachCapturePort(): void {
   if (activeCapturePort) {
     activeCapturePort.onmessage = null;
@@ -118,6 +131,11 @@ workerScope.onmessage = (event: MessageEvent<ToWorker>): void => {
         break;
       }
 
+      case 'setRxChannel': {
+        engine.setRxChannel(msg.channel);
+        break;
+      }
+
       case 'capturePort': {
         detachCapturePort();
         engine.stopTransmit();
@@ -181,6 +199,49 @@ workerScope.onmessage = (event: MessageEvent<ToWorker>): void => {
         blocksInFlight = 0;
         detachCapturePort();
         engine.reset();
+        break;
+      }
+
+      case 'sendBackward': {
+        const res = engine.modulateBackward(msg.bytes, msg.sampleRate);
+        if (res.t === 'error') {
+          postFromWorker(res);
+          break;
+        }
+        workerScope.postMessage({ t: 'backAudio', id: msg.id, audio: res.audio, sampleRate: msg.sampleRate }, [res.audio.buffer]);
+        break;
+      }
+
+      case 'backCapturePort': {
+        detachBackCapturePort();
+        const err = engine.startBackwardKeys(msg.sampleRate);
+        if (err) {
+          postFromWorker(err);
+          break;
+        }
+        backCapturePort = msg.port;
+        backCapturePort.onmessage = (portEv: MessageEvent<Float32Array>): void => {
+          const frame = portEv.data;
+          if (!(frame instanceof Float32Array) || frame.length === 0) return;
+          const liveMsg = engine.pushBackwardKeyChunk(frame);
+          if (liveMsg) postFromWorker(liveMsg);
+        };
+        break;
+      }
+
+      case 'stopBackCapture': {
+        detachBackCapturePort();
+        break;
+      }
+
+      case 'exportWav': {
+        const res = engine.exportPageWav(msg.bytes);
+        if (res.t === 'error') {
+          postFromWorker(res);
+          break;
+        }
+        const data = res.data.slice().buffer;
+        workerScope.postMessage({ t: 'wavExport', id: msg.id, data }, [data]);
         break;
       }
     }

@@ -34,7 +34,7 @@ Starting values (to calibrate, task 5):
 | L2 | noise, Eb/N0 ≈ 13.5 dB (initial draft: 10 dB; then 12.5 dB for ~17 parity erasures with CER = 0 on code row; raised to 13.5 dB by the task 5 simulated pre-calibration, because at 12.5 dB any new noise on an acoustic path breaks the code row about one time in two, see `docs/calibration.md` "FANTOME") |
 | L3 | offset +380 Hz, Eb/N0 ≈ 18 dB |
 | L4 | whisper, Eb/N0 ≈ 11.5 dB, 7 repeats, 1 s gaps (initial draft: 5 dB; adjusted for Curve-3 BER where 5 dB has 60% BER, while 11.5 dB gives 100% single-pass code-row CER and 0% 7-vote CER) |
-| L5 | `[STRETCH]` backward channel carries the code page; forward carries a decoy page ("Il n'y a rien ici…") — added to `levels.json` in task 7 once `v23-modem` task 14 lands |
+| L5 | `[STRETCH]` backward channel carries the code page; forward carries a decoy page ("Il n'y a rien ici…"). Added in task 7: Eb/N0 18 dB (relative to the forward bit, so the 75 baud code page has a wide margin; the difficulty is the channel, not the noise); accepted on seed 5001, feature off code-row CER 100 %. The WAV lasts about as long as the code page at 7.5 characters per second. |
 
 ## Manifest (`public/transmissions/manifest.json`, served)
 
@@ -82,7 +82,7 @@ Defaults for all other levels: adaptive threshold on, vote on.
   - *Envoi* on a story page starts the transmission; *Suite* after reception goes to the answer page with an input field.
   - *Guide* shows the level's hint.
 - The service asks the app to play a WAV instead of sending bytes: `ServiceOutput` gets an optional `{ playWav: string; simulate: false }`. The app's worker decodes the WAV in real-time file mode (scheduled reveal). The field is declared in the `neominitel-app` design and wired by task 4.1 here. Receptions from a WAV join the vote by similarity matching, as in `Écoute` mode.
-- For L5, the app enables the backward demodulator view in the HUD when the player turns on "Écoute voie retour".
+- For L5, the app enables the backward demodulator view in the HUD when the player turns on "Écoute voie retour". Implementation (task 7): HUD toggle « Écoute voie retour » (`MathHud`), UI state `rxChannel`, worker message `setRxChannel`, `LineEngine.setRxChannel` (recreates the demodulator on the chosen channel). The channel applies to WAV and microphone input; pages transmitted by the app itself are always decoded on the forward channel.
 - `src/fantome/progress.ts`: `{ unlocked: number }` in `localStorage`, every access wrapped in try/catch; without storage, progress lives in memory.
 - `src/fantome/check.ts`: `await crypto.subtle.digest('SHA-256', salt + normalize(input))`, compared in hex.
 

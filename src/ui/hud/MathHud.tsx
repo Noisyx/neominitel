@@ -6,7 +6,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
-import type { QualityEvent } from '../../modem';
+import { CHANNELS, type QualityEvent } from '../../modem';
 import { BerChart, type BerPoint } from './BerChart';
 import { DiscriminatorTrace } from './DiscriminatorTrace';
 import { EyeDiagram } from './EyeDiagram';
@@ -24,6 +24,9 @@ export interface MathHudProps {
   onToggleVisible: () => void;
   thresholdMode: 'fixed' | 'adaptive';
   onToggleThreshold: () => void;
+  /** Receive channel ("Écoute voie retour", 3615 FANTOME L5); the toggle shows when a handler is given. */
+  rxChannel?: 'forward' | 'backward';
+  onToggleRxChannel?: () => void;
   voteOn: boolean;
   onToggleVote: () => void;
   bufferRef: MutableRefObject<HudSignalBuffer>;
@@ -53,6 +56,8 @@ export function MathHud({
   onToggleVisible,
   thresholdMode,
   onToggleThreshold,
+  rxChannel = 'forward',
+  onToggleRxChannel,
   voteOn,
   onToggleVote,
   bufferRef,
@@ -186,6 +191,26 @@ export function MathHud({
               {voteOn ? 'Activé' : 'Arrêt'}
             </span>
           </button>
+
+          {onToggleRxChannel && (
+            <button
+              type="button"
+              className="nm-btn nm-hud-toggle"
+              aria-pressed={rxChannel === 'backward'}
+              title={`Écoute la voie retour à ${CHANNELS.backward.baud} bauds (${CHANNELS.backward.markHz} / ${CHANNELS.backward.spaceHz} Hz) au lieu de la voie aller`}
+              onClick={onToggleRxChannel}
+            >
+              <span
+                className="nm-status-dot"
+                data-active={rxChannel === 'backward' ? 'true' : 'false'}
+                aria-hidden="true"
+              />
+              <span>Écoute voie retour</span>
+              <span className="nm-toggle-state">
+                {rxChannel === 'backward' ? `${CHANNELS.backward.baud} bd` : 'Arrêt'}
+              </span>
+            </button>
+          )}
 
           <button
             type="button"

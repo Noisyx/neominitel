@@ -66,6 +66,10 @@ export interface UiState {
   crtEnabled: boolean;
   sim: SimParams;
   threshold: 'fixed' | 'adaptive';
+  /** Receive channel for WAV and microphone input ("Écoute voie retour", 3615 FANTOME L5). */
+  rxChannel: 'forward' | 'backward';
+  /** Backward keyboard (task 17): Écoute sends its keys at 75 baud, Serveur listens for them. */
+  backKeys: boolean;
   voteOn: boolean;
   votes: VoteStore;
   hudVisible: boolean;
@@ -104,6 +108,9 @@ export type UiAction =
   | { type: 'TOGGLE_CRT' }
   | { type: 'TOGGLE_HUD_VISIBLE' }
   | { type: 'TOGGLE_THRESHOLD' }
+  | { type: 'TOGGLE_RX_CHANNEL' }
+  | { type: 'TOGGLE_BACK_KEYS' }
+  | { type: 'BACK_KEYS_FAILED'; message: string }
   | { type: 'TOGGLE_VOTE' }
   | { type: 'SET_SIM'; sim: SimParams }
   | { type: 'CLEAR_BER_POINTS' }
@@ -200,6 +207,8 @@ export function createInitialUiState(standby: Screen): UiState {
     crtEnabled: true,
     sim: { ...DEFAULT_SIM_PARAMS },
     threshold: 'fixed',
+    rxChannel: 'forward',
+    backKeys: false,
     voteOn: true,
     votes: createEmptyVoteStore(),
     hudVisible: false,
@@ -693,6 +702,18 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
         ...state,
         threshold: state.threshold === 'adaptive' ? 'fixed' : 'adaptive',
       };
+
+    case 'TOGGLE_RX_CHANNEL':
+      return {
+        ...state,
+        rxChannel: state.rxChannel === 'backward' ? 'forward' : 'backward',
+      };
+
+    case 'TOGGLE_BACK_KEYS':
+      return { ...state, backKeys: !state.backKeys, notice: undefined };
+
+    case 'BACK_KEYS_FAILED':
+      return { ...state, backKeys: false, notice: action.message };
 
     case 'TOGGLE_VOTE': {
       const nextVoteOn = !state.voteOn;
