@@ -127,6 +127,24 @@ function rasterizeMosaicBlocks(rects: readonly MosaicBlockRect[]): Uint8Array {
   return out;
 }
 
+/**
+ * Part (px, py) of an 8 x 10 glyph enlarged w x h times (w, h in {1, 2}): output pixel (x, y)
+ * shows glyph pixel (floor((x + 8 px) / w), floor((y + 10 py) / h)) (nearest neighbour).
+ */
+export function scaleGlyphPart(glyph: Uint8Array, w: number, h: number, px: number, py: number): Uint8Array {
+  const out = new Uint8Array(CELL_HEIGHT_PX);
+  for (let y = 0; y < CELL_HEIGHT_PX; y++) {
+    const src = glyph[Math.floor((y + py * CELL_HEIGHT_PX) / h)] ?? 0;
+    let row = 0;
+    for (let x = 0; x < CELL_WIDTH_PX; x++) {
+      const sx = Math.floor((x + px * CELL_WIDTH_PX) / w);
+      if (src & (0x80 >> sx)) row |= 0x80 >> x;
+    }
+    out[y] = row;
+  }
+  return out;
+}
+
 function clampColourIndex(idx: number): number {
   if (!Number.isFinite(idx)) return 0;
   return Math.max(0, Math.min(7, Math.trunc(idx)));
@@ -200,6 +218,12 @@ export function resolveCellRender(
   // In alphanumeric mode, ESC 0x5A (disjoint flag) enables underline on bottom scanline
   if (cell.disjoint && (!cell.flash || flashVisible)) {
     bitmap[CELL_HEIGHT_PX - 1] |= 0xff;
+  }
+
+  // Enlarged character (videotex task 8): this cell shows one part of the glyph scaled x2.
+  if (cell.part !== undefined && (cell.doubleWidth || cell.doubleHeight)) {
+    const scaled = scaleGlyphPart(bitmap, cell.doubleWidth ? 2 : 1, cell.doubleHeight ? 2 : 1, cell.part.x, cell.part.y);
+    bitmap.set(scaled);
   }
 
   if (cursorHere) {

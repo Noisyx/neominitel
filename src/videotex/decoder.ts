@@ -91,15 +91,72 @@ export function createVideotexDecoder(): VideotexDecoder {
     }
   }
 
+  /** One row down, page mode: the status row and row 24 both continue on row 1. */
+  function cursorDown(): void {
+    if (currentScreen.cursor.row === STATUS_ROW || currentScreen.cursor.row >= PAGE_LAST_ROW) {
+      currentScreen.cursor.row = PAGE_FIRST_ROW;
+    } else {
+      currentScreen.cursor.row++;
+    }
+  }
+
+  /**
+   * Writes a character at the cursor and advances it (videotex task 8, design.md "Character
+   * size"). A normal-size character fills one cell. An enlarged one (G0 or G2 only) fills
+   * w x h cells, w = 2 for double width, h = 2 for double height: the cursor cell holds the
+   * bottom-left part and double height extends **upward** into the row above (checked against
+   * the miedit emulator, not on a real Minitel). Parts that would fall outside the page (column
+   * 41, or above row 1) are dropped. The cursor then moves w columns; past column 40 it goes to
+   * column 1, h rows down.
+   */
   function writeCellAtCursor(
     cell: Cell,
     changed: [row: number, col: number][],
   ): void {
     clampCursor();
     const { row, col } = currentScreen.cursor;
-    currentScreen.rows[row][col] = cloneCell(cell);
-    changed.push([row, col]);
-    advanceCursor();
+    const enlargeable = cell.set !== 'G1';
+    const w = enlargeable && cell.doubleWidth ? 2 : 1;
+    const h = enlargeable && cell.doubleHeight ? 2 : 1;
+    if (w === 1 && h === 1) {
+      const plain = cloneCell(cell);
+      delete plain.part;
+      currentScreen.rows[row][col] = plain;
+      changed.push([row, col]);
+      advanceCursor();
+      return;
+    }
+    for (let j = 0; j < h; j++) {
+      const r = row - j;
+      if (j > 0 && r < PAGE_FIRST_ROW) continue; // no top half above row 1
+      for (let i = 0; i < w; i++) {
+        const c = col + i;
+        if (c >= SCREEN_COLS) continue;
+        const part = cloneCell(cell);
+        part.part = { x: i as 0 | 1, y: (h - 1 - j) as 0 | 1 };
+        currentScreen.rows[r][c] = part;
+        changed.push([r, c]);
+      }
+    }
+    if (col + w < SCREEN_COLS) {
+      currentScreen.cursor.col = col + w;
+    } else {
+      currentScreen.cursor.col = 0;
+      for (let k = 0; k < h; k++) cursorDown();
+    }
+  }
+
+  /**
+   * ESC size codes (design.md "Character size", following miedit): ignored in G1 (mosaics are
+   * never enlarged) and on the status row; a size with double height is ignored on row 1,
+   * where there is no row above for the top half.
+   */
+  function setSize(doubleHeight: boolean, doubleWidth: boolean): void {
+    if (currentScreen.attrs.set === 'G1') return;
+    if (currentScreen.cursor.row === STATUS_ROW) return;
+    if (doubleHeight && currentScreen.cursor.row <= PAGE_FIRST_ROW) return;
+    currentScreen.attrs.doubleHeight = doubleHeight;
+    currentScreen.attrs.doubleWidth = doubleWidth;
   }
 
   function handleC0(val: number, changed: [row: number, col: number][]): void {
@@ -180,12 +237,17 @@ export function createVideotexDecoder(): VideotexDecoder {
         currentStats.controls++;
         lastPrintedCell = null;
         currentScreen.attrs.set = 'G1';
+        // A change of character set returns to normal size (design.md "Character size").
+        currentScreen.attrs.doubleHeight = false;
+        currentScreen.attrs.doubleWidth = false;
         break;
       }
       case C0.SI: {
         currentStats.controls++;
         lastPrintedCell = null;
         currentScreen.attrs.set = 'G0';
+        currentScreen.attrs.doubleHeight = false;
+        currentScreen.attrs.doubleWidth = false;
         break;
       }
       case C0.DC1: {
@@ -272,26 +334,22 @@ export function createVideotexDecoder(): VideotexDecoder {
         break;
       case ESC_CODES.SIZE_NORMAL:
         currentStats.controls++;
-        currentScreen.attrs.doubleHeight = false;
-        currentScreen.attrs.doubleWidth = false;
+        setSize(false, false);
         state = { kind: 'NORMAL' };
         break;
       case ESC_CODES.SIZE_DOUBLE_HEIGHT:
         currentStats.controls++;
-        currentScreen.attrs.doubleHeight = true;
-        currentScreen.attrs.doubleWidth = false;
+        setSize(true, false);
         state = { kind: 'NORMAL' };
         break;
       case ESC_CODES.SIZE_DOUBLE_WIDTH:
         currentStats.controls++;
-        currentScreen.attrs.doubleHeight = false;
-        currentScreen.attrs.doubleWidth = true;
+        setSize(false, true);
         state = { kind: 'NORMAL' };
         break;
       case ESC_CODES.SIZE_DOUBLE:
         currentStats.controls++;
-        currentScreen.attrs.doubleHeight = true;
-        currentScreen.attrs.doubleWidth = true;
+        setSize(true, true);
         state = { kind: 'NORMAL' };
         break;
       case ESC_CODES.MOSAIC_CONTIGUOUS:

@@ -13,6 +13,7 @@ import {
   cellsEqual,
   createBlankCell,
   createBlankScreen,
+  isCharacterOrigin,
   type Cell,
   type Screen,
 } from './screen';
@@ -276,6 +277,14 @@ export function buildPageScreen(
   const screen = createBlankScreen();
   const warnings: string[] = [];
 
+  // Rows used by text or mosaics: a double-height character needs the row above it free
+  // (its top half is drawn there, design.md "Character size").
+  const usedRows = new Set<number>(p.rows.map((r) => r.row));
+  for (const m of p.mosaics ?? []) {
+    const cellRows = Array.isArray(m.bitmap) ? Math.floor(m.bitmap.length / 3) : 0;
+    for (let k = 0; k < cellRows; k++) usedRows.add(m.row + k);
+  }
+
   // 1. Lay out text rows (1..24)
   for (const rowSpec of p.rows) {
     const startCol1 = rowSpec.col ?? 1;
@@ -293,12 +302,14 @@ export function buildPageScreen(
     let cursorCol = startCol1 - 1;
     for (const seg of rowSpec.segments) {
       const glyphs = textToGlyphs(seg.text, rowSpec.row, warnings);
-      if (cursorCol + glyphs.length > SCREEN_COLS) {
-        // Finish counting remaining segments on this row entry to report full length
-        let totalEndCol = cursorCol + glyphs.length;
+      const width = sizeFlags(seg.size).doubleWidth ? 2 : 1;
+      if (cursorCol + glyphs.length * width > SCREEN_COLS) {
+        // Finish counting remaining segments on this row entry to report full length (columns)
+        let totalEndCol = cursorCol + glyphs.length * width;
         const segIdx = rowSpec.segments.indexOf(seg);
         for (let k = segIdx + 1; k < rowSpec.segments.length; k++) {
-          totalEndCol += textToGlyphs(rowSpec.segments[k].text, rowSpec.row, []).length;
+          const wk = sizeFlags(rowSpec.segments[k].size).doubleWidth ? 2 : 1;
+          totalEndCol += textToGlyphs(rowSpec.segments[k].text, rowSpec.row, []).length * wk;
         }
         return {
           ok: false,
@@ -310,7 +321,17 @@ export function buildPageScreen(
       const bg = normalizeColour(seg.bg, COLOURS.BLACK);
       const flash = seg.flash ?? false;
       const inverse = seg.inverse ?? false;
-      const { doubleHeight, doubleWidth } = sizeFlags(seg.size);
+      const flags = sizeFlags(seg.size);
+      const doubleWidth = flags.doubleWidth;
+      let doubleHeight = flags.doubleHeight;
+      if (doubleHeight && (rowSpec.row <= PAGE_FIRST_ROW || usedRows.has(rowSpec.row - 1))) {
+        warnings.push(
+          `Row ${rowSpec.row}: double height needs a free row above (not row 1, no text or mosaic on row ${rowSpec.row - 1}); drawn at normal height`,
+        );
+        doubleHeight = false;
+      }
+      const w = doubleWidth ? 2 : 1;
+      const h = doubleHeight ? 2 : 1;
 
       for (const g of glyphs) {
         const cell: Cell = {
@@ -328,8 +349,15 @@ export function buildPageScreen(
         if (g.accent !== undefined) {
           cell.accent = g.accent;
         }
-        screen.rows[rowSpec.row][cursorCol] = cell;
-        cursorCol++;
+        // Same geometry as the decoder: bottom-left part at the cursor, top half on the row above.
+        for (let j = 0; j < h; j++) {
+          for (let i = 0; i < w; i++) {
+            const part = { ...cell };
+            if (w > 1 || h > 1) part.part = { x: i as 0 | 1, y: (h - 1 - j) as 0 | 1 };
+            screen.rows[rowSpec.row - j][cursorCol + i] = part;
+          }
+        }
+        cursorCol += w;
       }
     }
   }
@@ -470,6 +498,8 @@ export function buildPageScreen(
 
     for (let c = firstNonDefault; c <= lastNonDefault; c++) {
       const cell = screen.rows[r][c];
+      // Parts of an enlarged character follow its origin cell (synced below).
+      if (!isCharacterOrigin(cell)) continue;
       if (cell.bg !== activeBg) {
         if (isBackgroundDelimiterCell(cell)) {
           activeBg = cell.bg;
@@ -483,7 +513,29 @@ export function buildPageScreen(
     }
   }
 
+  // 5. The other parts of an enlarged character take the background of its origin cell.
+  for (let r = PAGE_FIRST_ROW; r <= PAGE_LAST_ROW; r++) {
+    for (let c = 0; c < SCREEN_COLS; c++) {
+      const origin = screen.rows[r][c];
+      if (!origin.part || !isCharacterOrigin(origin)) continue;
+      const w = origin.doubleWidth ? 2 : 1;
+      const h = origin.doubleHeight ? 2 : 1;
+      for (let j = 0; j < h; j++) {
+        for (let i = 0; i < w; i++) {
+          if (i === 0 && j === 0) continue;
+          const other = screen.rows[r - j]?.[c + i];
+          if (other?.part) other.bg = origin.bg;
+        }
+      }
+    }
+  }
+
   return { ok: true, value: { screen, warnings } };
+}
+
+/** Top half of a double-height character: drawn by the byte sent on the row below. */
+function isUpperPart(cell: Cell): boolean {
+  return cell.part !== undefined && cell.doubleHeight && cell.part.y === 0;
 }
 
 function emitSingleCell(out: number[], cell: Cell): void {
@@ -497,9 +549,11 @@ function emitSingleCell(out: number[], cell: Cell): void {
 function emitRow(
   out: number[],
   rowIndex: number,
-  cells: readonly Cell[],
+  rawCells: readonly Cell[],
   useRep: boolean,
-): { endedAtLastCol: boolean } {
+): { endedAtLastCol: boolean; lastHeight: number } {
+  // Top halves are written by the row below (emitted later); this row leaves them alone.
+  const cells = rawCells.map((cell) => (isUpperPart(cell) ? DEFAULT_BLANK_CELL : cell));
   let lastCol = -1;
   for (let c = SCREEN_COLS - 1; c >= 0; c--) {
     if (!isDefaultBlankCell(cells[c])) {
@@ -526,7 +580,7 @@ function emitRow(
       C0.ESC,
       ESC_CODES.SIZE_NORMAL,
     );
-    return { endedAtLastCol: false };
+    return { endedAtLastCol: false, lastHeight: 1 };
   }
 
   let firstCol = 0;
@@ -562,6 +616,11 @@ function emitRow(
   let c = firstCol;
   while (c <= lastCol) {
     const cell = cells[c];
+    if (!isCharacterOrigin(cell)) {
+      // Right half of a double-width character: the decoder already moved past it.
+      c++;
+      continue;
+    }
     let runLen = 1;
     while (c + runLen <= lastCol && cellsEqual(cells[c + runLen], cell)) {
       runLen++;
@@ -571,6 +630,7 @@ function emitRow(
     if (targetSet !== curSet) {
       out.push(targetSet === 'G1' ? C0.SO : C0.SI);
       curSet = targetSet;
+      curSizeCode = ESC_CODES.SIZE_NORMAL; // SO / SI return to normal size
     }
     if (cell.fg !== curFg) {
       out.push(C0.ESC, ESC_CODES.FG_BLACK + cell.fg);
@@ -621,7 +681,14 @@ function emitRow(
     c += runLen;
   }
 
-  return { endedAtLastCol: lastCol === SCREEN_COLS - 1 };
+  // Robustness (V3): end a row in normal size, so that if the next row's US is corrupted the
+  // bytes printed in its place are not enlarged into the row above.
+  if (curSizeCode !== ESC_CODES.SIZE_NORMAL) {
+    out.push(C0.ESC, ESC_CODES.SIZE_NORMAL);
+  }
+
+  const last = cells[lastCol];
+  return { endedAtLastCol: lastCol === SCREEN_COLS - 1, lastHeight: last.doubleHeight && last.part ? 2 : 1 };
 }
 
 /**
@@ -641,16 +708,19 @@ export function encodePage(
   const out: number[] = [C0.FF, C0.DC4];
 
   let row24Wrapped = false;
+  let row24Height = 1;
   for (let r = PAGE_FIRST_ROW; r <= PAGE_LAST_ROW; r++) {
     const res = emitRow(out, r, screen.rows[r], useRep);
     if (r === PAGE_LAST_ROW) {
       row24Wrapped = res.endedAtLastCol;
+      row24Height = res.lastHeight;
     }
   }
 
   if (row24Wrapped) {
     // Keep cursor on row 24 before emitting row 0 so a corrupted US on row 0 stays adjacent
-    out.push(C0.VT);
+    // (a double-height last character wrapped two rows down: go back up twice).
+    for (let k = 0; k < row24Height; k++) out.push(C0.VT);
   }
   const statusRes = emitRow(out, STATUS_ROW, screen.rows[STATUS_ROW], useRep);
   if (!statusRes.endedAtLastCol) {
