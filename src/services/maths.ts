@@ -1,3 +1,4 @@
+import { MATHS_COURS_PAGES } from '../../content/pages/maths';
 import { COLOURS, encodePage, type PageSource } from '../videotex';
 import type { InputFieldSpec, Service, ServiceInput, ServiceOutput } from './types';
 
@@ -11,8 +12,8 @@ export const MATHS_MENU_INPUT: InputFieldSpec = {
 };
 
 /**
- * Provisional 3615 MATHS pages inside `src/services/maths.ts` (Role A folder) while
- * `content/pages/maths.ts` remains reserved for Role B (the mathematician, J9).
+ * Menu, bench and vote pages of 3615 MATHS. The six course pages written by the mathematician live
+ * in `content/pages/maths.ts` (MATHS_COURS_PAGES) and open with menu choice 4 (app task 11.1).
  */
 export const MATHS_PROVISIONAL_PAGES: readonly PageSource[] = [
   {
@@ -69,6 +70,14 @@ export const MATHS_PROVISIONAL_PAGES: readonly PageSource[] = [
         segments: [
           { text: ' 3 ', fg: COLOURS.BLACK, bg: COLOURS.GREEN },
           { text: ' VOTE : erreur sur 1/3/5/7 reçus', fg: COLOURS.GREEN, bg: COLOURS.BLACK },
+        ],
+      },
+      {
+        row: 16,
+        col: 3,
+        segments: [
+          { text: ' 4 ', fg: COLOURS.BLACK, bg: COLOURS.WHITE },
+          { text: ' COURS : les 6 pages expliquées', fg: COLOURS.WHITE, bg: COLOURS.BLACK },
         ],
       },
       {
@@ -231,6 +240,13 @@ export const MATHS_PROVISIONAL_PAGES: readonly PageSource[] = [
         ],
       },
       {
+        row: 15,
+        col: 3,
+        segments: [
+          { text: '- Courbe 4 : corrélateurs simulés', fg: COLOURS.MAGENTA },
+        ],
+      },
+      {
         row: 17,
         col: 2,
         segments: [
@@ -371,7 +387,7 @@ export const MATHS_GUIDE_PAGE: PageSource = {
       row: 4,
       col: 2,
       segments: [
-        { text: '- Tapez 1, 2 (BANC), 3 (VOTE) + ENVOI', fg: COLOURS.WHITE },
+        { text: '- Tapez 1 à 4 puis ENVOI (4 = COURS)', fg: COLOURS.WHITE },
       ],
     },
     {
@@ -416,6 +432,17 @@ export const MATHS_GUIDE_PAGE: PageSource = {
 export interface MathsState {
   readonly index: number;
   readonly inGuide: boolean;
+  /** Position in MATHS_COURS_PAGES while the course (menu choice 4) is open; absent otherwise. */
+  readonly cours?: number;
+}
+
+/** Menu choice that opens the course pages of `content/pages/maths.ts` (app task 11.1). */
+export const MATHS_COURS_CHOICE = 4;
+
+const HOME: MathsState = { index: 0, inGuide: false };
+
+function coursOutput(i: number): [MathsState, ServiceOutput] {
+  return [{ index: 0, inGuide: false, cours: i }, toOutput(MATHS_COURS_PAGES[i])];
 }
 
 function toOutput(page: PageSource): ServiceOutput {
@@ -438,6 +465,7 @@ function resolveMenuChoice(raw: string): number | null {
   if (cleaned === '1' || cleaned === 'FSK') return 1;
   if (cleaned === '2' || cleaned === 'BANC' || cleaned === 'BER') return 2;
   if (cleaned === '3' || cleaned === 'VOTE') return 3;
+  if (cleaned === '4' || cleaned === 'COURS') return MATHS_COURS_CHOICE;
   return null;
 }
 
@@ -449,6 +477,24 @@ export const mathsService: Service<MathsState> = {
   },
 
   handle(state: MathsState, input: ServiceInput): [MathsState, ServiceOutput | null] {
+    // Course pages (menu choice 4): SUITE / RETOUR walk the six pages, then back to the menu.
+    if (state.cours !== undefined) {
+      const c = state.cours;
+      switch (input.key) {
+        case 'Sommaire':
+          return [HOME, toOutput(MATHS_PROVISIONAL_PAGES[0])];
+        case 'Guide':
+          return [{ ...state, inGuide: true }, toOutput(MATHS_GUIDE_PAGE)];
+        case 'Suite':
+          if (state.inGuide) return coursOutput(c);
+          return c + 1 < MATHS_COURS_PAGES.length ? coursOutput(c + 1) : [HOME, toOutput(MATHS_PROVISIONAL_PAGES[0])];
+        case 'Retour':
+          if (state.inGuide) return coursOutput(c);
+          return c > 0 ? coursOutput(c - 1) : [HOME, toOutput(MATHS_PROVISIONAL_PAGES[0])];
+        default:
+          return [state, null];
+      }
+    }
     switch (input.key) {
       case 'Sommaire':
         return [{ index: 0, inGuide: false }, toOutput(MATHS_PROVISIONAL_PAGES[0])];
@@ -459,6 +505,7 @@ export const mathsService: Service<MathsState> = {
       case 'Envoi': {
         if (!state.inGuide && state.index === 0) {
           const targetIdx = resolveMenuChoice(input.text);
+          if (targetIdx === MATHS_COURS_CHOICE) return coursOutput(0);
           if (targetIdx !== null) {
             return [
               { index: targetIdx, inGuide: false },

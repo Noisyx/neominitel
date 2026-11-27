@@ -100,6 +100,7 @@ import {
   MATHS_PROVISIONAL_PAGES,
   mathsService,
 } from '../../src/services/maths';
+import { MATHS_COURS_PAGES } from '../../content/pages/maths';
 import { createEventScheduler } from '../../src/ui/scheduler';
 import {
   decodePageSourceToScreen,
@@ -2062,5 +2063,73 @@ describe('GaplessPlayer Web Audio resilience (gesture unlock, Safari interrupted
     );
     expect(resampled.length).toBe(4410);
     expect(resampled[2000]).toBeCloseTo(0.25, 6);
+  });
+});
+
+describe('neominitel-app Task 11.1: 3615 MATHS course pages', () => {
+  type MathsInput = Parameters<typeof mathsService.handle>[1];
+  const key = (k: string, text = ''): MathsInput => ({ kind: 'key', key: k, text }) as MathsInput;
+
+  it('menu choice 4 (or COURS) opens the six course pages; SUITE / RETOUR walk them; the ends, SOMMAIRE and GUIDE behave', () => {
+    const lint = lintPages([...MATHS_PROVISIONAL_PAGES, MATHS_GUIDE_PAGE, ...MATHS_COURS_PAGES]);
+    expect(lint.issues).toEqual([]);
+    expect(MATHS_COURS_PAGES).toHaveLength(6);
+
+    const [home] = mathsService.init();
+    for (const choice of ['4', 'cours', ' COURS ']) {
+      const [s, out] = mathsService.handle(home, key('Envoi', choice));
+      expect(out?.pageId, choice).toBe(MATHS_COURS_PAGES[0].id);
+      expect(s.cours).toBe(0);
+    }
+
+    // Forward through the six pages, then back to the menu.
+    let [state, out] = mathsService.handle(home, key('Envoi', '4'));
+    const seen = [out?.pageId];
+    for (let i = 1; i < 6; i++) {
+      [state, out] = mathsService.handle(state, key('Suite'));
+      seen.push(out?.pageId);
+    }
+    expect(seen).toEqual(MATHS_COURS_PAGES.map((p) => p.id));
+    [state, out] = mathsService.handle(state, key('Suite'));
+    expect(out?.pageId).toBe('maths/accueil');
+    expect(state.cours).toBeUndefined();
+
+    // RETOUR on page 2 goes to page 1, on page 1 to the menu.
+    [state] = mathsService.handle(home, key('Envoi', '4'));
+    [state] = mathsService.handle(state, key('Suite'));
+    [state, out] = mathsService.handle(state, key('Retour'));
+    expect(out?.pageId).toBe(MATHS_COURS_PAGES[0].id);
+    [state, out] = mathsService.handle(state, key('Retour'));
+    expect(out?.pageId).toBe('maths/accueil');
+
+    // GUIDE from page 3, then RETOUR comes back to page 3; SOMMAIRE always returns to the menu.
+    [state] = mathsService.handle(home, key('Envoi', '4'));
+    [state] = mathsService.handle(state, key('Suite'));
+    [state] = mathsService.handle(state, key('Suite'));
+    [state, out] = mathsService.handle(state, key('Guide'));
+    expect(out?.pageId).toBe('maths/guide');
+    [state, out] = mathsService.handle(state, key('Retour'));
+    expect(out?.pageId).toBe(MATHS_COURS_PAGES[2].id);
+    [state, out] = mathsService.handle(state, key('Sommaire'));
+    expect(out?.pageId).toBe('maths/accueil');
+    expect(state.cours).toBeUndefined();
+
+    // The existing choices are unchanged.
+    expect(mathsService.handle(home, key('Envoi', '2'))[1]?.pageId).toBe('maths/banc');
+    expect(mathsService.handle(home, key('Envoi', '5'))[1]).toBeNull();
+  });
+});
+
+describe('neominitel-app Task 11.2: curve 4 on the BER chart', () => {
+  it('draws curve 4 (correlator receiver, v23-modem task 15) with its legend, over the 19 points of the curve 3 grid', () => {
+    const html = renderToStaticMarkup(createElement(BerChart, { points: [] }));
+    expect(html).toContain('4. Corrél. MC');
+    const m = html.match(/<path d="([^"]+)" fill="none" stroke="#d18cff"/);
+    expect(m).not.toBeNull();
+    const vertices = (m?.[1] ?? '').trim().split(' ');
+    expect(vertices).toHaveLength(19);
+    expect(vertices[0].startsWith('M')).toBe(true);
+    expect(vertices.slice(1).every((v) => v.startsWith('L'))).toBe(true);
+    expect(html).toContain('4 courbes affichées');
   });
 });

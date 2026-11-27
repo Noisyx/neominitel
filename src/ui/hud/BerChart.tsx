@@ -45,6 +45,27 @@ const DEFAULT_CURVE3_DATA: Curve3Dataset = {
   ],
 };
 
+/**
+ * Baseline snapshot (BER only) of `public/data/ber-curve4.json`: the correlator receiver of
+ * v23-modem task 15, same chain, grid and seeds as curve 3. Refreshed over HTTP on mount like
+ * curve 3; drawn as a line without its band to keep the chart readable.
+ */
+const DEFAULT_CURVE4_DATA: Curve3Dataset = {
+  ebN0Db: DEFAULT_CURVE3_DATA.ebN0Db,
+  ber: [
+    0.6871, 0.6829, 0.6688, 0.6561, 0.6231, 0.5819, 0.4982, 0.3855, 0.2538, 0.1477, 0.07765,
+    0.03734, 0.01587, 0.005319, 0.001769, 0.0005984, 0.0001786, 0.00005358, 0.000004465,
+  ],
+  lo: DEFAULT_CURVE3_DATA.lo,
+  hi: DEFAULT_CURVE3_DATA.hi,
+};
+
+function linePath(curve: Curve3Dataset): string {
+  return curve.ebN0Db
+    .map((db, i) => `${i === 0 ? 'M' : 'L'}${dbToX(db).toFixed(1)},${berToY(curve.ber[i]).toFixed(1)}`)
+    .join(' ');
+}
+
 function isValidCurve3Dataset(val: unknown): val is Curve3Dataset {
   if (!val || typeof val !== 'object') return false;
   const c = val as Record<string, unknown>;
@@ -153,6 +174,7 @@ function formatSciBer(ber: number): string {
  */
 export function BerChart({ points, onClearPoints }: BerChartProps): ReactElement {
   const [curve3Data, setCurve3Data] = useState<Curve3Dataset>(DEFAULT_CURVE3_DATA);
+  const [curve4Data, setCurve4Data] = useState<Curve3Dataset>(DEFAULT_CURVE4_DATA);
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof fetch !== 'function') {
@@ -172,6 +194,16 @@ export function BerChart({ points, onClearPoints }: BerChartProps): ReactElement
       .catch(() => {
         // Keep embedded baseline Curve 3 data if offline or unreachable
       });
+    void fetch(`${prefix}data/ber-curve4.json`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json: unknown) => {
+        if (!cancelled && isValidCurve3Dataset(json)) {
+          setCurve4Data(json);
+        }
+      })
+      .catch(() => {
+        // Keep embedded baseline Curve 4 data if offline or unreachable
+      });
     return () => {
       cancelled = true;
     };
@@ -181,10 +213,11 @@ export function BerChart({ points, onClearPoints }: BerChartProps): ReactElement
     () => buildCurvesGeometry(curve3Data),
     [curve3Data],
   );
+  const curve4Path = useMemo(() => linePath(curve4Data), [curve4Data]);
   const latest = points.length > 0 ? points[points.length - 1] : null;
   const srSummary = latest
     ? `Courbes BER V.23 : ${points.length} point(s) mesuré(s). Dernier point à Eb/N0 ${latest.ebN0Db.toFixed(1)} dB : BER ${formatSciBer(latest.ber)} (intervalle Wilson 95 % de ${formatSciBer(latest.lo)} à ${formatSciBer(latest.hi)} sur ${latest.bits} bits).`
-    : 'Courbes BER V.23 : 3 courbes théoriques affichées (FSK orthogonal, Marcum Q1 h=2/3, discriminateur Monte Carlo). Aucun point PN9 mesuré pour le moment.';
+    : 'Courbes BER V.23 : 4 courbes affichées (FSK orthogonal, Marcum Q1 h=2/3, discriminateur Monte Carlo, corrélateurs Monte Carlo). Aucun point PN9 mesuré pour le moment.';
 
   const dbTicks = [0, 6, 12, 18];
   const logTicks: readonly { exp: number; label: string }[] = [
@@ -314,6 +347,15 @@ export function BerChart({ points, onClearPoints }: BerChartProps): ReactElement
           strokeWidth="1.6"
         />
 
+        {/* Curve 4: correlator receiver (v23-modem task 15, Monte Carlo) */}
+        <path
+          d={curve4Path}
+          fill="none"
+          stroke="#d18cff"
+          strokeWidth="1.4"
+          strokeDasharray="5 2"
+        />
+
         {/* Live measured PN9 points with 95% Wilson intervals */}
         {points.map((pt) => {
           const x = dbToX(pt.ebN0Db);
@@ -363,6 +405,7 @@ export function BerChart({ points, onClearPoints }: BerChartProps): ReactElement
         <span className="nm-legend-c1">1. Orthog.</span>
         <span className="nm-legend-c2">2. Marcum h=2/3</span>
         <span className="nm-legend-c3">3. Discrim. MC</span>
+        <span className="nm-legend-c4">4. Corrél. MC</span>
         <span className="nm-legend-pt">● Mesure 95%</span>
       </div>
 

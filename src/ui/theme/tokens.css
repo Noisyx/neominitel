@@ -1070,6 +1070,10 @@ body {
   color: var(--nm-accent);
 }
 
+.nm-legend-c4 {
+  color: #d18cff;
+}
+
 .nm-legend-pt {
   color: #ff8a65;
 }

@@ -54,8 +54,8 @@ Tags: `[MVP]` is needed for the demo, `[STRETCH]` only if time allows. Depends o
   - [x] 10.2 Vote panel; property test A4 (after calibration).
   - _Requirements: 7.1-7.4_
 
-- [ ] 11. 3615 MATHS `[MVP]` (mathematician writes the pages)
-  - [ ] 11.1 Six explanation pages with mosaic diagrams.
+- [x] 11. 3615 MATHS `[MVP]` (mathematician writes the pages)
+  - [x] 11.1 Six explanation pages with mosaic diagrams. (`content/pages/maths.ts`, menu choice 4 « COURS » in `src/services/maths.ts`; the BER chart also draws curve 4 of `v23-modem` task 15.)
   - [x] 11.2 "Banc d'essai": PN9 frames, BER chart with three curves and live points.
   - [x] 11.3 "Vote" page: measured cell error rate after 1/3/5/7 receptions vs formulas.
   - _Requirements: 6.1-6.4_
