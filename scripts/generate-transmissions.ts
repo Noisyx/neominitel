@@ -463,6 +463,7 @@ export function decodeWavWithAppPipeline(
   let lastCharSample = 0;
   let streamCursor = 0;
   let latestScreen = createBlankScreen();
+  let recentErrorCount = 0;
 
   function commitCompletedPage(): void {
     const stats = vtxDecoder.stats();
@@ -472,6 +473,7 @@ export function decodeWavWithAppPipeline(
     vtxDecoder.reset();
     pageActive = false;
     pageStartedByFf = false;
+    recentErrorCount = 0;
 
     if (!wasStartedByFf && stats.printable < 16) {
       return;
@@ -498,7 +500,15 @@ export function decodeWavWithAppPipeline(
         if (pageActive && ev.atSample - lastCharSample >= idleSamplesThreshold) {
           commitCompletedPage();
         }
-        const hasError = !ev.parityOk || !ev.framingOk;
+        let hasError = !ev.parityOk || !ev.framingOk;
+        if (
+          !hasError &&
+          (ev.value & 0x7f) === C0.FF &&
+          pageActive &&
+          recentErrorCount > 0
+        ) {
+          hasError = true;
+        }
         const isCleanFf = !hasError && (ev.value & 0x7f) === C0.FF;
         if (isCleanFf && pageActive) {
           if (vtxDecoder.stats().printable >= 20) {
@@ -507,6 +517,7 @@ export function decodeWavWithAppPipeline(
             vtxDecoder.reset();
             pageActive = false;
             pageStartedByFf = false;
+            recentErrorCount = 0;
           }
         }
         const { changed } = vtxDecoder.push({
@@ -521,6 +532,9 @@ export function decodeWavWithAppPipeline(
           pageActive = true;
         }
         lastCharSample = ev.atSample;
+        recentErrorCount = hasError
+          ? Math.min(4, recentErrorCount + 1)
+          : Math.max(0, recentErrorCount - 1);
       }
     }
 

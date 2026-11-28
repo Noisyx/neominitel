@@ -278,6 +278,50 @@ export function stepRouterKey(
   });
 
   if (maybeOut === null) {
+    // Allow cross-service 3615 code entry (e.g. "Choix ou code : SOMMAIRE / LIBRE") when unhandled by active service
+    if (key === 'Envoi' && state.lastOutput.input !== undefined) {
+      const crossTargetId = resolveServiceCode(state.inputBuffer);
+      if (crossTargetId !== null) {
+        const targetService = getServiceById(crossTargetId);
+        const [targetState, rawOut] = targetService.init();
+        const output = cloneOutput(rawOut);
+        return {
+          state: {
+            activeServiceId: crossTargetId,
+            serviceState: targetState,
+            lastOutput: output,
+            inputBuffer: '',
+          },
+          effect: {
+            kind: 'transmit',
+            output: cloneOutput(output),
+            isRepetition: false,
+            withConnectionSequence: false,
+          },
+        };
+      }
+    }
+
+    // Pressing Retour on a service's root page returns to the 3615 SOMMAIRE directory
+    if (key === 'Retour' && state.activeServiceId !== 'SOMMAIRE') {
+      const [sommaireState, rawOut] = sommaireService.init();
+      const output = cloneOutput(rawOut);
+      return {
+        state: {
+          activeServiceId: 'SOMMAIRE',
+          serviceState: sommaireState,
+          lastOutput: output,
+          inputBuffer: '',
+        },
+        effect: {
+          kind: 'transmit',
+          output: cloneOutput(output),
+          isRepetition: false,
+          withConnectionSequence: false,
+        },
+      };
+    }
+
     return {
       state: {
         ...state,

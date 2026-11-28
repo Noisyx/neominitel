@@ -152,6 +152,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
   let demodSampleOrigin = 0;
   let pageActive = false;
   let pageStartedByFf = false;
+  let recentErrorCount = 0;
   let lastCharGlobalSample = 0;
   let berSettleUntilSample = 0;
   let lastBerEmitSample = 0;
@@ -203,6 +204,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
     vtxDecoder.reset();
     pageActive = false;
     pageStartedByFf = false;
+    recentErrorCount = 0;
 
     // Ignore brief idle-carrier noise bursts that never started with FF and produced < 16 chars.
     if (!wasStartedByFf && stats.printable < 16) {
@@ -270,7 +272,16 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
             emitPageEndIfValid(globalSample, out);
           }
 
-          const hasError = !ev.parityOk || !ev.framingOk;
+          let hasError = !ev.parityOk || !ev.framingOk;
+          // Guard against a random 1-in-512 noise byte landing on 0x0C (FF) mid-burst and wiping the page
+          if (
+            !hasError &&
+            (ev.value & 0x7f) === C0.FF &&
+            pageActive &&
+            recentErrorCount > 0
+          ) {
+            hasError = true;
+          }
           const isCleanFf = !hasError && (ev.value & 0x7f) === C0.FF;
           if (isCleanFf && pageActive) {
             // Commit completed previous repetition before FF wipes rows 1..24
@@ -280,6 +291,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
               vtxDecoder.reset();
               pageActive = false;
               pageStartedByFf = false;
+              recentErrorCount = 0;
             }
           }
 
@@ -307,6 +319,9 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
           }
 
           lastCharGlobalSample = globalSample;
+          recentErrorCount = hasError
+            ? Math.min(4, recentErrorCount + 1)
+            : Math.max(0, recentErrorCount - 1);
 
           if (changed.length > 0) {
             const seen = new Set<number>();
@@ -393,6 +408,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       demodSampleOrigin = 0;
       pageActive = false;
       pageStartedByFf = false;
+      recentErrorCount = 0;
       lastCharGlobalSample = 0;
       berSettleUntilSample = 0;
       lastBerEmitSample = 0;
@@ -479,6 +495,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       demodSampleOrigin = 0;
       pageActive = false;
       pageStartedByFf = false;
+      recentErrorCount = 0;
       lastCharGlobalSample = 0;
       vtxDecoder.reset();
       spectrum.reset();
@@ -525,6 +542,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       demodSampleOrigin = 0;
       pageActive = false;
       pageStartedByFf = false;
+      recentErrorCount = 0;
       lastCharGlobalSample = 0;
       vtxDecoder.reset();
       spectrum.reset();
@@ -866,6 +884,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       activeTx = null;
       pageActive = false;
       pageStartedByFf = false;
+      recentErrorCount = 0;
     },
 
     setSim(nextSim: SimParams): void {
@@ -966,6 +985,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       demodSampleOrigin = 0;
       pageActive = false;
       pageStartedByFf = false;
+      recentErrorCount = 0;
       lastCharGlobalSample = 0;
       berSettleUntilSample = 0;
       lastBerEmitSample = 0;

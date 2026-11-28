@@ -108,7 +108,7 @@ export const FANTOME_ACCUEIL_PAGE: PageSource = {
       row: 21,
       col: 2,
       segments: [
-        { text: 'Niveau (1-4) : ..', fg: COLOURS.YELLOW },
+        { text: 'Niveau (1-5) : ..', fg: COLOURS.YELLOW },
       ],
     },
     {
@@ -780,7 +780,21 @@ export const FANTOME_GUIDE_PAGE: PageSource = {
       ],
     },
     {
-      row: 20,
+      row: 17,
+      col: 2,
+      segments: [
+        { text: 'Si un chant grave double un leurre :', fg: COLOURS.GREEN },
+      ],
+    },
+    {
+      row: 18,
+      col: 3,
+      segments: [
+        { text: 'basculez sur Ecoute voie retour 75bd.', fg: COLOURS.WHITE },
+      ],
+    },
+    {
+      row: 21,
       col: 2,
       segments: [
         { text: ' SOMMAIRE ', fg: COLOURS.BLACK, bg: COLOURS.CYAN },

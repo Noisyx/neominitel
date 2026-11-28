@@ -25,7 +25,7 @@
     {
       "id": "L3",
       "title": "La radio mal accordée",
-      "hint": "L'émetteur dérive de +380 Hz : activez le bouton « Accord automatique » dans le panneau Math HUD puis relancez l'écoute pour recaler le seuil de décision.",
+      "hint": "L'émetteur dérive de +380 Hz : activez « Accord auto » sous l'écran Minitel (ou via Sous le capot) puis relancez l'écoute pour recaler le seuil.",
       "storyPage": "fantome/story-l3",
       "wav": "transmissions/L3.wav",
       "feature": "adaptive",
@@ -35,7 +35,7 @@
     {
       "id": "L4",
       "title": "Le murmure",
-      "hint": "Une écoute isolée est noyée dans le souffle, mais la bande répète la page 7 fois : laissez le bouton « Vote » activé dans le Math HUD jusqu'à la fin des 7 passages.",
+      "hint": "Une écoute isolée est noyée dans le souffle, mais la bande répète la page 7 fois : laissez « Vote » activé sous l'écran jusqu'à la fin des 7 passages.",
       "storyPage": "fantome/story-l4",
       "wav": "transmissions/L4.wav",
       "feature": "vote",
@@ -45,7 +45,7 @@
     {
       "id": "L5",
       "title": "La voix du retour",
-      "hint": "La page aiguë est un leurre : le vrai message passe sur la voie retour, à 75 bauds dans le grave (390 et 450 Hz). Activez « Écoute voie retour » dans le Math HUD puis relancez l'écoute, et patientez : la voix est lente.",
+      "hint": "La page aiguë est un leurre : le vrai message passe à 75 bauds dans le grave (390 / 450 Hz). Activez « Écoute voie retour » sous l'écran puis relancez l'écoute.",
       "storyPage": "fantome/story-l5",
       "wav": "transmissions/L5.wav",
       "feature": "backward",

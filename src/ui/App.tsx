@@ -1172,7 +1172,12 @@ export function App(): ReactElement {
       <main className="nm-stage">
         <div
           className="nm-workspace"
-          data-hud-open={state.hudVisible ? 'true' : 'false'}
+          data-hud-open={
+            state.hudVisible ||
+            (state.router?.activeServiceId === 'LIBRE' && state.session !== 'start')
+              ? 'true'
+              : 'false'
+          }
         >
           <MinitelShell
             online={state.session === 'online'}
@@ -1196,6 +1201,20 @@ export function App(): ReactElement {
                     aria-hidden="true"
                   />
                   <span>Accord auto</span>
+                </button>
+                <button
+                  type="button"
+                  className="nm-chin-switch"
+                  aria-pressed={state.rxChannel === 'backward'}
+                  title={`Écoute la voie retour (${CHANNELS.backward.baud} bauds, ${CHANNELS.backward.markHz}/${CHANNELS.backward.spaceHz} Hz) sur les fichiers WAV et au microphone`}
+                  onClick={handleToggleRxChannel}
+                >
+                  <span
+                    className="nm-chin-dot"
+                    data-active={state.rxChannel === 'backward' ? 'true' : 'false'}
+                    aria-hidden="true"
+                  />
+                  <span>Écoute voie retour</span>
                 </button>
                 {(state.mode === 'Ecoute' || state.mode === 'Serveur') && (
                   <button
@@ -1390,53 +1409,65 @@ export function App(): ReactElement {
             </div>
           </MinitelShell>
 
-          {state.router?.activeServiceId === 'LIBRE' && state.session !== 'start' && (
-            <LibreEditor onSend={handleLibreSend} onExportWav={handleLibreExportWav} />
-          )}
-
-          {state.hudVisible && (
-            <MathHud
-              visible={state.hudVisible}
-              onToggleVisible={handleToggleHudVisible}
-              thresholdMode={state.threshold}
-              onToggleThreshold={handleToggleThreshold}
-              rxChannel={state.rxChannel}
-              onToggleRxChannel={handleToggleRxChannel}
-              voteOn={state.voteOn}
-              onToggleVote={handleToggleVote}
-              bufferRef={hudBufferRef}
-              quality={state.quality}
-              cps={state.cps}
-              parityErrors={state.errors.parity}
-              framingErrors={state.errors.framing}
-              voteSummary={getActiveVoteSummary(state.votes)}
-              berPoints={state.berPoints}
-              onClearBerPoints={handleClearBerPoints}
-              showBerChart={state.router?.activeServiceId === 'MATHS'}
-              voteProgression={getActiveVoteProgression(state.votes)}
-              showVoteCerPanel={
-                state.router?.lastOutput.pageId === 'maths/vote' ||
-                (getActiveVoteSummary(state.votes)?.receptions ?? 0) >= 2
-              }
-              canAutoRepeatVote={
-                state.mode === 'Seul' &&
-                state.session !== 'start' &&
-                state.router !== null
-              }
-              autoRepeatingVote={state.autoRepeatTarget > 0}
-              onRunSevenReceptions={handleRunSevenReceptions}
-              simSlot={
-                state.mode === 'Seul' ? (
-                  <SimControls
-                    sim={state.sim}
-                    canReplay={state.session !== 'start' && state.router !== null}
-                    disabled={state.router?.lastOutput.playWav !== undefined}
-                    onChangeSim={handleChangeSim}
-                    onReplaySeeded={handleReplaySeeded}
+          {((state.router?.activeServiceId === 'LIBRE' &&
+            state.session !== 'start') ||
+            state.hudVisible) && (
+            <div className="nm-side-column">
+              {state.router?.activeServiceId === 'LIBRE' &&
+                state.session !== 'start' && (
+                  <LibreEditor
+                    onSend={handleLibreSend}
+                    onExportWav={handleLibreExportWav}
                   />
-                ) : undefined
-              }
-            />
+                )}
+
+              {state.hudVisible && (
+                <MathHud
+                  visible={state.hudVisible}
+                  onToggleVisible={handleToggleHudVisible}
+                  thresholdMode={state.threshold}
+                  onToggleThreshold={handleToggleThreshold}
+                  rxChannel={state.rxChannel}
+                  onToggleRxChannel={handleToggleRxChannel}
+                  voteOn={state.voteOn}
+                  onToggleVote={handleToggleVote}
+                  bufferRef={hudBufferRef}
+                  quality={state.quality}
+                  cps={state.cps}
+                  parityErrors={state.errors.parity}
+                  framingErrors={state.errors.framing}
+                  voteSummary={getActiveVoteSummary(state.votes)}
+                  berPoints={state.berPoints}
+                  onClearBerPoints={handleClearBerPoints}
+                  showBerChart={state.router?.activeServiceId === 'MATHS'}
+                  voteProgression={getActiveVoteProgression(state.votes)}
+                  showVoteCerPanel={
+                    state.router?.lastOutput.pageId === 'maths/vote' ||
+                    (getActiveVoteSummary(state.votes)?.receptions ?? 0) >= 2
+                  }
+                  canAutoRepeatVote={
+                    state.mode === 'Seul' &&
+                    state.session !== 'start' &&
+                    state.router !== null
+                  }
+                  autoRepeatingVote={state.autoRepeatTarget > 0}
+                  onRunSevenReceptions={handleRunSevenReceptions}
+                  simSlot={
+                    state.mode === 'Seul' ? (
+                      <SimControls
+                        sim={state.sim}
+                        canReplay={
+                          state.session !== 'start' && state.router !== null
+                        }
+                        disabled={state.router?.lastOutput.playWav !== undefined}
+                        onChangeSim={handleChangeSim}
+                        onReplaySeeded={handleReplaySeeded}
+                      />
+                    ) : undefined
+                  }
+                />
+              )}
+            </div>
           )}
         </div>
       </main>
