@@ -35,7 +35,7 @@
     "transmissionPage": "fantome/tx-l3",
     "codeRow": 13,
     "code": "Ectoplasme",
-    "hint": "L'émetteur dérive de +380 Hz : activez le bouton « Accord automatique » dans le panneau Math HUD puis relancez l'écoute pour recaler le seuil de décision.",
+    "hint": "L'émetteur dérive de +380 Hz : activez « Accord auto » sous l'écran Minitel (ou via Sous le capot) puis relancez l'écoute pour recaler le seuil.",
     "damage": {
       "kind": "offset",
       "offsetHz": 380,
@@ -51,7 +51,7 @@
     "transmissionPage": "fantome/tx-l4",
     "codeRow": 13,
     "code": "Crépuscule",
-    "hint": "Une écoute isolée est noyée dans le souffle, mais la bande répète la page 7 fois : laissez le bouton « Vote » activé dans le Math HUD jusqu'à la fin des 7 passages.",
+    "hint": "Une écoute isolée est noyée dans le souffle, mais la bande répète la page 7 fois : laissez « Vote » activé sous l'écran jusqu'à la fin des 7 passages.",
     "damage": {
       "kind": "whisper",
       "ebN0Db": 18,
@@ -73,7 +73,7 @@
     "transmissionPage": "fantome/tx-l5",
     "codeRow": 13,
     "code": "Revenant",
-    "hint": "La page aiguë est un leurre : le vrai message passe sur la voie retour, à 75 bauds dans le grave (390 et 450 Hz). Activez « Écoute voie retour » dans le Math HUD puis relancez l'écoute, et patientez : la voix est lente.",
+    "hint": "La page aiguë est un leurre : le vrai message passe à 75 bauds dans le grave (390 / 450 Hz). Activez « Écoute voie retour » sous l'écran puis relancez l'écoute.",
     "damage": {
       "kind": "backward",
       "decoyPage": "fantome/decoy-l5",

@@ -109,9 +109,9 @@ body {
   flex-wrap: wrap;
 }
 
-/* Wide screens: fixed 3-column grid so the mode bar never shifts when the
-   toolbar changes width (e.g. the Son button is hidden in Écoute mode). */
-@media (min-width: 1081px) {
+/* Wide screens: fixed 3-column grid once each 1fr side column fits all 4 toolbar buttons on one row
+   so the mode bar never shifts when the Son button is hidden in Écoute mode. */
+@media (min-width: 1320px) {
   .nm-topbar {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
@@ -124,6 +124,7 @@ body {
   .nm-topbar > .nm-toolbar {
     justify-self: end;
     justify-content: flex-end;
+    flex-wrap: nowrap;
   }
 }
 
@@ -329,7 +330,16 @@ body {
   display: flex;
   justify-content: center;
   align-items: flex-start;
+  gap: 20px;
   width: 100%;
+}
+
+.nm-side-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  min-width: 0;
 }
 
 .nm-shell:focus {
@@ -374,7 +384,7 @@ body {
 
 .nm-crt-viewport {
   position: relative;
-  width: min(100%, calc((100dvh - 276px) * 1.28));
+  width: min(100%, calc((100dvh - 320px) * 1.28));
   margin: 0 auto;
   aspect-ratio: 320 / 250;
   background-color: var(--nm-crt-glass);
@@ -835,7 +845,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 8px 12px;
+  padding: 8px;
   border-radius: 8px;
   background-color: var(--nm-deep);
   border: 1px solid var(--nm-border);
@@ -1426,6 +1436,7 @@ body {
 @media (max-width: 1080px) {
   .nm-workspace,
   .nm-workspace[data-hud-open='false'] {
+    display: grid;
     grid-template-columns: minmax(0, 1fr);
     justify-items: center;
   }
@@ -1434,7 +1445,9 @@ body {
     width: 100%;
   }
 
-  .nm-hud {
+  .nm-side-column,
+  .nm-hud,
+  .nm-libre {
     max-width: 720px;
   }
 
@@ -1484,13 +1497,16 @@ body {
 
 /* 3615 LIBRE editor (neominitel-app task 16) */
 .nm-libre {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border: 1px solid rgba(235, 228, 214, 0.14);
-  border-radius: 8px;
-  background: #0f1211;
-  color: #ede7da;
-  max-width: 760px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--nm-border);
+  border-radius: 16px;
+  background-color: var(--nm-surface);
+  color: var(--nm-text-primary);
+  width: 100%;
+  min-width: 0;
 }
 
 .nm-libre-head {
@@ -1498,59 +1514,101 @@ body {
   justify-content: space-between;
   align-items: baseline;
   gap: 12px;
-  margin-bottom: 8px;
+  flex-wrap: wrap;
 }
 
 .nm-libre-body {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  align-items: flex-start;
+  gap: 16px;
 }
 
 .nm-libre-canvas {
   width: 320px;
   height: 288px;
+  max-width: 100%;
   image-rendering: pixelated;
-  border: 1px solid rgba(235, 228, 214, 0.2);
+  border: 1px solid var(--nm-border-strong);
+  border-radius: 6px;
+  background-color: var(--nm-crt-glass);
   cursor: crosshair;
   touch-action: none;
 }
 
 .nm-libre-tools {
-  flex: 1 1 320px;
+  flex: 1 1 300px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   font-size: 13px;
+  color: var(--nm-text-secondary);
 }
 
 .nm-libre-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+}
+
+.nm-libre-row select,
+.nm-libre-row input[type='number'],
+.nm-libre-row input[type='text'],
+.nm-libre-link {
+  min-height: 30px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--nm-border-strong);
+  background-color: var(--nm-deep);
+  color: var(--nm-text-primary);
+  font-family: var(--nm-font-sans);
+  font-size: 12px;
+}
+
+.nm-libre-row select:focus-visible,
+.nm-libre-row input[type='number']:focus-visible,
+.nm-libre-row input[type='text']:focus-visible,
+.nm-libre-link:focus-visible {
+  outline: 2px solid var(--nm-focus-ring);
+  outline-offset: 2px;
 }
 
 .nm-libre-row input[type='number'] {
-  width: 3.5em;
+  width: 4em;
+  font-family: var(--nm-font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .nm-libre-row input[type='text'] {
   flex: 1 1 12em;
-  font-family: ui-monospace, monospace;
+  font-family: var(--nm-font-mono);
+}
+
+.nm-libre-row input[type='checkbox'] {
+  accent-color: var(--nm-accent);
 }
 
 .nm-libre-lines {
-  border: 1px solid rgba(235, 228, 214, 0.12);
-  border-radius: 6px;
-  padding: 6px 8px;
+  border: 1px solid var(--nm-border);
+  background-color: var(--nm-deep);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+}
+
+.nm-libre-lines legend {
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--nm-text-secondary);
 }
 
 .nm-libre-link {
   width: 100%;
-  font-family: ui-monospace, monospace;
+  font-family: var(--nm-font-mono);
   font-size: 11px;
 }
