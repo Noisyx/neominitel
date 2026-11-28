@@ -54,12 +54,17 @@
     "hint": "Une écoute isolée est noyée dans le souffle, mais la bande répète la page 7 fois : laissez le bouton « Vote » activé dans le Math HUD jusqu'à la fin des 7 passages.",
     "damage": {
       "kind": "whisper",
-      "ebN0Db": 11.5,
+      "ebN0Db": 18,
       "repeats": 7,
-      "gapMs": 1000
+      "gapMs": 800,
+      "burstWave": {
+        "cyclesPerPass": 8,
+        "duty": 0.33,
+        "burstEbN0Db": 3.5
+      }
     },
     "feature": "vote",
-    "seed": 4025
+    "seed": 4001
   },
   {
     "id": "L5",

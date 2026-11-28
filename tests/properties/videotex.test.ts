@@ -80,6 +80,8 @@ import {
   cellErrorRateByRow,
   IncrementalVote,
   vote,
+  voteAligned,
+  type VisitedReception,
 } from '../../src/videotex/vote';
 import { cloneScreen } from '../../src/videotex/screen';
 import { changedRowIndices } from '../helpers/screen-diff';
@@ -1477,5 +1479,131 @@ describe('Videotex Task 8: character size', () => {
     expect(bad.value.screen.rows[1][0]).toMatchObject({ doubleHeight: false });
     expect(bad.value.screen.rows[6][0]).toMatchObject({ doubleHeight: false, doubleWidth: true });
     expect(rowToText(bad.value.screen, 5).startsWith('X')).toBe(true);
+  });
+
+  it('V15 vote alignment under bursts: shifted post-error islands and unvisited rows recover the reference row regardless of reception order', () => {
+    const arbCase = fc
+      .record({
+        shiftA: fc.integer({ min: -4, max: 4 }).filter((s) => s !== 0),
+        shiftB: fc.integer({ min: -4, max: 4 }).filter((s) => s !== 0),
+        permSeed: fc.integer({ min: 0, max: 1000 }),
+      })
+      .filter(({ shiftA, shiftB }) => shiftA !== shiftB);
+
+    const page: PageSource = {
+      id: 'prop/v15',
+      rows: [
+        {
+          row: 13,
+          col: 1,
+          segments: [
+            {
+              text: ' -=* CLEF : CREPUSCULE *=- ARCHIVE 2012 ',
+              fg: COLOURS.BLACK,
+              bg: COLOURS.CYAN,
+            },
+          ],
+        },
+      ],
+    };
+    const encoded = encodePage(page);
+    expect(encoded.ok).toBe(true);
+    if (!encoded.ok) return;
+    const ref = decodeBytes(encoded.value.bytes);
+
+    fc.assert(
+      fc.property(arbCase, ({ shiftA, shiftB, permSeed }) => {
+        const makeFullVisited = (): Uint8Array => {
+          const v = new Uint8Array(SCREEN_ROWS * SCREEN_COLS);
+          v.fill(1, 13 * SCREEN_COLS, 14 * SCREEN_COLS);
+          return v;
+        };
+
+        // Reception 1: left cols 0..24 intact, right cols 25..39 erased
+        const rx1 = cloneScreen(ref);
+        const vis1 = makeFullVisited();
+        for (let c = 25; c < SCREEN_COLS; c++) {
+          rx1.rows[13][c] = createBlankCell({ error: true });
+          vis1[13 * SCREEN_COLS + c] = 0;
+        }
+
+        // Reception 2: left cols 0..10 intact, burst at 11..14, then cols 15..33 shifted by shiftA with degraded attrs
+        const rx2 = createBlankScreen();
+        const vis2 = new Uint8Array(SCREEN_ROWS * SCREEN_COLS);
+        for (let c = 0; c <= 10; c++) {
+          rx2.rows[13][c] = cloneScreen(ref).rows[13][c];
+          vis2[13 * SCREEN_COLS + c] = 1;
+        }
+        for (let c = 11; c <= 14; c++) {
+          rx2.rows[13][c] = createBlankCell({ error: true });
+        }
+        for (let srcCol = 15; srcCol <= 33; srcCol++) {
+          const dstCol = srcCol + shiftA;
+          if (dstCol >= 15 && dstCol < SCREEN_COLS) {
+            rx2.rows[13][dstCol] = {
+              ...ref.rows[13][srcCol],
+              fg: COLOURS.WHITE,
+              bg: COLOURS.BLACK,
+            };
+            vis2[13 * SCREEN_COLS + dstCol] = 1;
+          }
+        }
+
+        // Reception 3: burst at cols 0..5, then cols 11..34 shifted by shiftB
+        const rx3 = createBlankScreen();
+        const vis3 = new Uint8Array(SCREEN_ROWS * SCREEN_COLS);
+        for (let c = 0; c <= 5; c++) {
+          rx3.rows[13][c] = createBlankCell({ error: true });
+        }
+        for (let srcCol = 11; srcCol <= 34; srcCol++) {
+          const dstCol = srcCol + shiftB;
+          if (dstCol >= 6 && dstCol < SCREEN_COLS) {
+            rx3.rows[13][dstCol] = { ...ref.rows[13][srcCol] };
+            vis3[13 * SCREEN_COLS + dstCol] = 1;
+          }
+        }
+
+        // Reception 4 & 5: US(13) lost -> row 13 completely unvisited (blank with error: false!)
+        const rxUnvisited = createBlankScreen();
+        const visUnvisited = new Uint8Array(SCREEN_ROWS * SCREEN_COLS);
+
+        // Reception 6 & 7: right half intact (cols 15..39), left half erased
+        const rx6 = cloneScreen(ref);
+        const vis6 = makeFullVisited();
+        for (let c = 0; c < 15; c++) {
+          rx6.rows[13][c] = createBlankCell({ error: true });
+          vis6[13 * SCREEN_COLS + c] = 0;
+        }
+        const rx7 = cloneScreen(rx6);
+        const vis7 = vis6.slice();
+
+        const baseList: VisitedReception[] = [
+          { screen: rx1, visitedMask: vis1 },
+          { screen: rx2, visitedMask: vis2 },
+          { screen: rx3, visitedMask: vis3 },
+          { screen: rxUnvisited, visitedMask: visUnvisited },
+          { screen: cloneScreen(rxUnvisited), visitedMask: visUnvisited.slice() },
+          { screen: rx6, visitedMask: vis6 },
+          { screen: rx7, visitedMask: vis7 },
+        ];
+
+        // Deterministic permutation from permSeed to check order independence
+        const permuted = baseList.slice();
+        let state = (permSeed + 1) >>> 0;
+        for (let i = permuted.length - 1; i > 0; i--) {
+          state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+          const j = state % (i + 1);
+          const tmp = permuted[i];
+          permuted[i] = permuted[j];
+          permuted[j] = tmp;
+        }
+
+        const resA = voteAligned(baseList);
+        const resB = voteAligned(permuted);
+        expect(screensEqual(resA.screen, resB.screen)).toBe(true);
+        expect(cellErrorRate(resA.screen, ref, [13])).toBe(0);
+      }),
+      { numRuns: isSlowTestsEnabled() ? 150 : 40 },
+    );
   });
 });

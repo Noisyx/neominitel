@@ -151,6 +151,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
   let streamSampleCursor = 0;
   let demodSampleOrigin = 0;
   let pageActive = false;
+  let pageStartedByFf = false;
   let lastCharGlobalSample = 0;
   let berSettleUntilSample = 0;
   let lastBerEmitSample = 0;
@@ -194,6 +195,28 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
     return null;
   }
 
+  function emitPageEndIfValid(atSample: number, out: TimedEvent[]): void {
+    const stats = vtxDecoder.stats();
+    const screen = vtxDecoder.screen();
+    const visitedMask = vtxDecoder.visitedMask();
+    const wasStartedByFf = pageStartedByFf;
+    vtxDecoder.reset();
+    pageActive = false;
+    pageStartedByFf = false;
+
+    // Ignore brief idle-carrier noise bursts that never started with FF and produced < 16 chars.
+    if (!wasStartedByFf && stats.printable < 16) {
+      return;
+    }
+
+    out.push({
+      atSample,
+      e: 'pageEnd',
+      screen,
+      ...(visitedMask ? { visitedMask } : {}),
+    });
+  }
+
   function convertDemodEvents(
     rawEvents: readonly DemodEvent[],
     chunkEndGlobalSample: number,
@@ -209,13 +232,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
         case 'carrier': {
           out.push({ atSample: globalSample, e: 'carrier', on: ev.on });
           if (!ev.on && pageActive) {
-            out.push({
-              atSample: globalSample,
-              e: 'pageEnd',
-              screen: vtxDecoder.screen(),
-            });
-            vtxDecoder.reset();
-            pageActive = false;
+            emitPageEndIfValid(globalSample, out);
           }
           break;
         }
@@ -246,7 +263,26 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
           break;
         }
         case 'char': {
+          if (
+            pageActive &&
+            globalSample - lastCharGlobalSample >= idleSamplesThreshold
+          ) {
+            emitPageEndIfValid(globalSample, out);
+          }
+
           const hasError = !ev.parityOk || !ev.framingOk;
+          const isCleanFf = !hasError && (ev.value & 0x7f) === C0.FF;
+          if (isCleanFf && pageActive) {
+            // Commit completed previous repetition before FF wipes rows 1..24
+            if (vtxDecoder.stats().printable >= 20) {
+              emitPageEndIfValid(globalSample, out);
+            } else {
+              vtxDecoder.reset();
+              pageActive = false;
+              pageStartedByFf = false;
+            }
+          }
+
           out.push({
             atSample: globalSample,
             e: 'rxStats',
@@ -261,10 +297,11 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
           });
 
           // FF clears all 24x40 = 960 page cells
-          const isPageClear = !hasError && (ev.value & 0x7f) === C0.FF && changed.length === 960;
+          const isPageClear = isCleanFf && changed.length === 960;
           if (isPageClear) {
             out.push({ atSample: globalSample, e: 'pageStart' });
             pageActive = true;
+            pageStartedByFf = true;
           } else if (!pageActive) {
             pageActive = true;
           }
@@ -291,13 +328,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       pageActive &&
       chunkEndGlobalSample - lastCharGlobalSample >= idleSamplesThreshold
     ) {
-      out.push({
-        atSample: chunkEndGlobalSample,
-        e: 'pageEnd',
-        screen: vtxDecoder.screen(),
-      });
-      vtxDecoder.reset();
-      pageActive = false;
+      emitPageEndIfValid(chunkEndGlobalSample, out);
     }
 
     return out;
@@ -361,6 +392,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       streamSampleCursor = 0;
       demodSampleOrigin = 0;
       pageActive = false;
+      pageStartedByFf = false;
       lastCharGlobalSample = 0;
       berSettleUntilSample = 0;
       lastBerEmitSample = 0;
@@ -446,6 +478,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       streamSampleCursor = 0;
       demodSampleOrigin = 0;
       pageActive = false;
+      pageStartedByFf = false;
       lastCharGlobalSample = 0;
       vtxDecoder.reset();
       spectrum.reset();
@@ -491,6 +524,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       streamSampleCursor = 0;
       demodSampleOrigin = 0;
       pageActive = false;
+      pageStartedByFf = false;
       lastCharGlobalSample = 0;
       vtxDecoder.reset();
       spectrum.reset();
@@ -528,13 +562,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
         allEvents.push(ev);
       }
       if (pageActive) {
-        allEvents.push({
-          atSample: streamSampleCursor,
-          e: 'pageEnd',
-          screen: vtxDecoder.screen(),
-        });
-        vtxDecoder.reset();
-        pageActive = false;
+        emitPageEndIfValid(streamSampleCursor, allEvents);
       }
 
       return { t: 'live', events: allEvents };
@@ -577,13 +605,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
 
         const eventsWav = convertDemodEvents(rawWavEvents, streamSampleCursor);
         if (isLastWavBlock && pageActive) {
-          eventsWav.push({
-            atSample: streamSampleCursor,
-            e: 'pageEnd',
-            screen: vtxDecoder.screen(),
-          });
-          vtxDecoder.reset();
-          pageActive = false;
+          emitPageEndIfValid(streamSampleCursor, eventsWav);
         }
 
         const wavTxId = activeTx.id;
@@ -808,12 +830,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
 
       const events = convertDemodEvents(rawEvents, streamSampleCursor);
       if (isLastPageBlock && pageActive) {
-        events.push({
-          atSample: streamSampleCursor,
-          e: 'pageEnd',
-          screen: vtxDecoder.screen(),
-        });
-        pageActive = false;
+        emitPageEndIfValid(streamSampleCursor, events);
       }
 
       const txId = activeTx.id;
@@ -848,6 +865,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
     stopTransmit(): void {
       activeTx = null;
       pageActive = false;
+      pageStartedByFf = false;
     },
 
     setSim(nextSim: SimParams): void {
@@ -947,6 +965,7 @@ export function createLineEngine(options?: LineEngineOptions): LineEngine {
       streamSampleCursor = 0;
       demodSampleOrigin = 0;
       pageActive = false;
+      pageStartedByFf = false;
       lastCharGlobalSample = 0;
       berSettleUntilSample = 0;
       lastBerEmitSample = 0;

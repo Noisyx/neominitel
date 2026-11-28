@@ -128,11 +128,12 @@ function cellErrorRate(s: Screen, ref: Screen, rows?: number[]): number;
 
 ### Encoder (robust page encoding)
 1. Emit FF, then DC4 (cursor hidden).
-2. For **every** row 1-24, in order, emit US (row, first column). Then emit every attribute explicitly (foreground, background, set, flash, inverse, size), whatever the decoder's reset behaviour. With US on every row, a lost byte damages at most the row before, its own row and the row after (property V3).
-3. Emit segments. Change the background colour only just before a space or a mosaic character (Deviation 1).
-4. Replace runs of 4 or more identical cells with the character followed by REP (0x40 + n − 1), splitting runs longer than 64.
-5. Accents: SS2 + diacritic + base letter.
-6. Row 0 (status): US 0x40 0x41 then the text, emitted last.
+2. For **every** row 1-24, in order, emit US (row, first column) and the active attributes that differ from the US defaults (empty rows need only US, since US already resets attributes to defaults). With US on every row, a lost byte damages at most the row before, its own row and the row after (property V3).
+3. Within each non-empty row, re-anchor the cursor and active attributes with US (row, column) every 8 columns whenever the background delimiter rule allows (`bg` is black or the cell is a space / mosaic delimiter), so a mid-row burst or UART framing slip cannot shift all remaining columns of the row.
+4. Emit segments. Change the background colour only just before a space or a mosaic character (Deviation 1).
+5. Replace runs of 4 or more identical cells with the character followed by REP (0x40 + n − 1), splitting runs longer than 64.
+6. Accents: SS2 + diacritic + base letter.
+7. Row 0 (status): US 0x40 0x41 then the text (plus CAN when shorter than 40 columns), emitted last.
 
 ### Mosaic from image `[STRETCH]`
 For each 2×3 cell, try all 28 pairs of distinct palette colours plus the 8 single colours; assign each block to the nearer colour of the pair; keep the pair with the lowest squared error. Optional Floyd-Steinberg error diffusion between cells.
@@ -156,6 +157,7 @@ function imageToMosaic(img: RgbImage, cols: number, rows: number, o?: ImageMosai
 - Two cells are equal when every field except `error` is equal.
 - For each cell, count values among non-error cells (a map from the serialized cell to its count). The winner needs a strict majority over the other values; otherwise, or if there are no valid votes, the cell is an error cell.
 - `IncrementalVote` keeps the counts per cell, so adding a reception costs 1 000 updates.
+- **Burst-resilient alignment (`voteAligned`, added after `docs/calibration.md` L4 analysis):** when noise bursts destroy `US` cursor positioning codes or slip UART framing mid-row, two failure modes arise in plain cell-by-cell voting: (a) skipped rows/spans stay at `FF`-cleared blank cells (`error: false`) and outvote genuine characters, and (b) contiguous clean islands after an error on the row shift horizontally (or land on `r − 1` when `US(r)` is lost). `VideotexDecoder.visitedMask()` records which cells were explicitly written since `FF`/`reset`, and `voteAligned` performs two symmetric Jacobi passes realigning post-error islands (`≥ 3` cells) against the consensus of the other receptions before tallying votes while keeping unvisited blanks subordinate to any `≥ 2`-reception explicit consensus (property V15).
 
 ### Math notes (for 3615 MATHS)
 - If each reception damages a cell independently with probability p, and every damage is detected (erasure), the vote fails only when all N copies are erased: P_fail = pᴺ.
@@ -201,6 +203,7 @@ function imageToMosaic(img: RgbImage, cols: number, rows: number, o?: ImageMosai
 | V12 `[STRETCH]` | Image to mosaic optimality: without diffusion, every cell's squared error equals the error of its reported colours and blocks and is ≤ that of every single colour and every pair of the palette. |
 | V14 `[STRETCH]` | Character size: double width fills 2 columns and moves the cursor by 2; double height fills the cursor cell and the cell above; size codes are ignored in G1, on the status row and (with double height) on row 1; SO / SI reset the size; the parts of an enlarged character tile its glyph scaled ×2. |
 | V13 `[STRETCH]` | Image to mosaic round trip: an image with at most two palette colours per cell gives total error 0 (with or without diffusion), and decoding encodePage of its `sources` gives, cell by cell, the chosen G1 code, fg and bg. |
+| V15 | Vote alignment under bursts: given ≥ 3 receptions of a valid PageSource where individual receptions suffer shifted post-error character islands or unvisited rows (`visitedMask = 0`) while at least two receptions preserve each character, `voteAligned` recovers the reference row regardless of reception order. |
 
 ## Error handling
 - `PageError`: `{ kind: 'row-too-long'; row: number; length: number } | { kind: 'too-many-rows' } | { kind: 'bad-bitmap'; reason: string }`.

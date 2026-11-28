@@ -546,6 +546,51 @@ function emitSingleCell(out: number[], cell: Cell): void {
   }
 }
 
+const INTRA_ROW_ANCHOR_COLS = 8;
+
+function emitPositionAnchor(
+  out: number[],
+  rowIndex: number,
+  col0: number,
+  targetSet: 'G0' | 'G1',
+  fg: number,
+  bg: number,
+  flash: boolean,
+  inverse: boolean,
+  disjoint: boolean,
+  sizeCode: number,
+  prevSizeCode: number,
+): void {
+  // Reset to normal size before US so an aborted US never prints its parameter bytes enlarged.
+  if (prevSizeCode !== ESC_CODES.SIZE_NORMAL) {
+    out.push(C0.ESC, ESC_CODES.SIZE_NORMAL);
+  }
+  out.push(C0.US, 0x40 + rowIndex, 0x40 + col0 + 1);
+  // US resets decoder attributes to defaults (G0, FG_WHITE, BG_BLACK, steady, normal video,
+  // contiguous mosaic, normal size); emit only the attributes that differ from defaults.
+  if (targetSet === 'G1') {
+    out.push(C0.SO);
+  }
+  if (fg !== COLOURS.WHITE) {
+    out.push(C0.ESC, ESC_CODES.FG_BLACK + fg);
+  }
+  if (bg !== COLOURS.BLACK) {
+    out.push(C0.ESC, ESC_CODES.BG_BLACK + bg);
+  }
+  if (flash) {
+    out.push(C0.ESC, ESC_CODES.FLASH);
+  }
+  if (inverse) {
+    out.push(C0.ESC, ESC_CODES.INVERSE_VIDEO);
+  }
+  if (disjoint) {
+    out.push(C0.ESC, ESC_CODES.MOSAIC_DISJOINT);
+  }
+  if (sizeCode !== ESC_CODES.SIZE_NORMAL) {
+    out.push(C0.ESC, sizeCode);
+  }
+}
+
 function emitRow(
   out: number[],
   rowIndex: number,
@@ -563,23 +608,8 @@ function emitRow(
   }
 
   if (lastCol < 0) {
-    // Empty row: still emit US(row, 1) and explicit default attributes (Design step 2)
+    // Empty row: emit US(row, 1) (which resets attributes to defaults) for single-byte locality (V3).
     out.push(C0.US, 0x40 + rowIndex, 0x41);
-    out.push(
-      C0.SI,
-      C0.ESC,
-      ESC_CODES.FG_WHITE,
-      C0.ESC,
-      ESC_CODES.BG_BLACK,
-      C0.ESC,
-      ESC_CODES.STEADY,
-      C0.ESC,
-      ESC_CODES.NORMAL_VIDEO,
-      C0.ESC,
-      ESC_CODES.MOSAIC_CONTIGUOUS,
-      C0.ESC,
-      ESC_CODES.SIZE_NORMAL,
-    );
     return { endedAtLastCol: false, lastHeight: 1 };
   }
 
@@ -600,18 +630,21 @@ function emitRow(
   let curDisjoint = firstCell.disjoint;
   let curSizeCode = sizeEscCode(firstCell);
 
-  // Position row with US(row, firstCol + 1) and emit every attribute explicitly
-  out.push(C0.US, 0x40 + rowIndex, 0x40 + firstCol + 1);
-  out.push(curSet === 'G1' ? C0.SO : C0.SI);
-  out.push(C0.ESC, ESC_CODES.FG_BLACK + curFg);
-  out.push(C0.ESC, ESC_CODES.BG_BLACK + curBg);
-  out.push(C0.ESC, curFlash ? ESC_CODES.FLASH : ESC_CODES.STEADY);
-  out.push(C0.ESC, curInverse ? ESC_CODES.INVERSE_VIDEO : ESC_CODES.NORMAL_VIDEO);
-  out.push(
-    C0.ESC,
-    curDisjoint ? ESC_CODES.MOSAIC_DISJOINT : ESC_CODES.MOSAIC_CONTIGUOUS,
+  // Position row with US(row, firstCol + 1) and active attributes
+  emitPositionAnchor(
+    out,
+    rowIndex,
+    firstCol,
+    curSet,
+    curFg,
+    curBg,
+    curFlash,
+    curInverse,
+    curDisjoint,
+    curSizeCode,
+    ESC_CODES.SIZE_NORMAL,
   );
-  out.push(C0.ESC, curSizeCode);
+  let lastAnchorCol = firstCol;
 
   let c = firstCol;
   while (c <= lastCol) {
@@ -626,39 +659,74 @@ function emitRow(
       runLen++;
     }
 
-    const targetSet: 'G0' | 'G1' = cell.set === 'G1' ? 'G1' : 'G0';
-    if (targetSet !== curSet) {
-      out.push(targetSet === 'G1' ? C0.SO : C0.SI);
-      curSet = targetSet;
-      curSizeCode = ESC_CODES.SIZE_NORMAL; // SO / SI return to normal size
-    }
-    if (cell.fg !== curFg) {
-      out.push(C0.ESC, ESC_CODES.FG_BLACK + cell.fg);
+    // Re-anchor cursor + attributes periodically within the row whenever background delimiter
+    // rules allow (Req 4.4: either bg is BLACK or the cell is a space/mosaic delimiter), so a
+    // burst or framing slip earlier on the row cannot shift the rest of the row.
+    const canAnchorBg =
+      cell.bg === COLOURS.BLACK || isBackgroundDelimiterCell(cell);
+    if (
+      c > firstCol &&
+      canAnchorBg &&
+      c - lastAnchorCol >= INTRA_ROW_ANCHOR_COLS &&
+      c <= SCREEN_COLS - 4
+    ) {
+      curSet = cell.set === 'G1' ? 'G1' : 'G0';
       curFg = cell.fg;
-    }
-    if (cell.bg !== curBg && isBackgroundDelimiterCell(cell)) {
-      out.push(C0.ESC, ESC_CODES.BG_BLACK + cell.bg);
-      curBg = cell.bg;
-    }
-    if (cell.flash !== curFlash) {
-      out.push(C0.ESC, cell.flash ? ESC_CODES.FLASH : ESC_CODES.STEADY);
+      curBg = isBackgroundDelimiterCell(cell) ? cell.bg : COLOURS.BLACK;
       curFlash = cell.flash;
-    }
-    if (cell.inverse !== curInverse) {
-      out.push(C0.ESC, cell.inverse ? ESC_CODES.INVERSE_VIDEO : ESC_CODES.NORMAL_VIDEO);
       curInverse = cell.inverse;
-    }
-    if (cell.disjoint !== curDisjoint) {
-      out.push(
-        C0.ESC,
-        cell.disjoint ? ESC_CODES.MOSAIC_DISJOINT : ESC_CODES.MOSAIC_CONTIGUOUS,
-      );
       curDisjoint = cell.disjoint;
-    }
-    const nextSizeCode = sizeEscCode(cell);
-    if (nextSizeCode !== curSizeCode) {
-      out.push(C0.ESC, nextSizeCode);
+      const nextSizeCode = sizeEscCode(cell);
+      emitPositionAnchor(
+        out,
+        rowIndex,
+        c,
+        curSet,
+        curFg,
+        curBg,
+        curFlash,
+        curInverse,
+        curDisjoint,
+        nextSizeCode,
+        curSizeCode,
+      );
       curSizeCode = nextSizeCode;
+      lastAnchorCol = c;
+    } else {
+      const targetSet: 'G0' | 'G1' = cell.set === 'G1' ? 'G1' : 'G0';
+      if (targetSet !== curSet) {
+        out.push(targetSet === 'G1' ? C0.SO : C0.SI);
+        curSet = targetSet;
+        curSizeCode = ESC_CODES.SIZE_NORMAL; // SO / SI return to normal size
+      }
+      if (cell.fg !== curFg) {
+        out.push(C0.ESC, ESC_CODES.FG_BLACK + cell.fg);
+        curFg = cell.fg;
+      }
+      if (cell.bg !== curBg && isBackgroundDelimiterCell(cell)) {
+        out.push(C0.ESC, ESC_CODES.BG_BLACK + cell.bg);
+        curBg = cell.bg;
+      }
+      if (cell.flash !== curFlash) {
+        out.push(C0.ESC, cell.flash ? ESC_CODES.FLASH : ESC_CODES.STEADY);
+        curFlash = cell.flash;
+      }
+      if (cell.inverse !== curInverse) {
+        out.push(C0.ESC, cell.inverse ? ESC_CODES.INVERSE_VIDEO : ESC_CODES.NORMAL_VIDEO);
+        curInverse = cell.inverse;
+      }
+      if (cell.disjoint !== curDisjoint) {
+        out.push(
+          C0.ESC,
+          cell.disjoint ? ESC_CODES.MOSAIC_DISJOINT : ESC_CODES.MOSAIC_CONTIGUOUS,
+        );
+        curDisjoint = cell.disjoint;
+      }
+      const nextSizeCode = sizeEscCode(cell);
+      if (nextSizeCode !== curSizeCode) {
+        out.push(C0.ESC, nextSizeCode);
+        curSizeCode = nextSizeCode;
+      }
     }
 
     if (useRep && runLen >= 4) {

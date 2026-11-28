@@ -60,7 +60,7 @@ export type TimedEvent = { atSample: number } & (
       sampleRate: number;
     }
   | { e: 'pageStart' }
-  | { e: 'pageEnd'; screen: Screen }
+  | { e: 'pageEnd'; screen: Screen; visitedMask?: Uint8Array }
   | { e: 'carrier'; on: boolean }
   | { e: 'connect' }
   | { e: 'quality'; q: QualityEvent }
