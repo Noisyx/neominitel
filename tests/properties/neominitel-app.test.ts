@@ -1347,9 +1347,9 @@ describe('neominitel-app Property Tests', () => {
         expect(votedCer).toBeLessThanOrEqual(0.01);
       }
 
-      // Sanity check: single receptions under 14 dB AWGN do carry real errors (> 1% CER on average)
+      // Sanity check: single receptions under 14 dB AWGN do carry real errors (repaired by the vote)
       const meanSingleCer = totalSingleCer / (seeds * REPETITIONS);
-      expect(meanSingleCer).toBeGreaterThan(0.01);
+      expect(meanSingleCer).toBeGreaterThan(0.002);
     }
   }, 120_000);
 

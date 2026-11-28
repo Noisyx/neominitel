@@ -1,10 +1,15 @@
 import { screenSimilarity } from '../services';
 import {
+  cellsEqual,
+  createBlankCell,
   decodeBytes,
   IncrementalVote,
   SCREEN_COLS,
   SCREEN_ROWS,
+  voteAligned,
+  type Cell,
   type Screen,
+  type VisitedReception,
   type VoteResult,
 } from '../videotex';
 import type { ActiveVoteSummary } from './hud/VotePanel';
@@ -17,12 +22,15 @@ import type { LineMode } from './screens/ModeBar';
 /** Minimum non-error cell similarity required to join an existing vote in Écoute / Fichier mode (Req 7.4). */
 export const VOTE_MATCH_SIMILARITY = 0.8;
 export const MAX_STORED_RECEPTIONS_FOR_METRICS = 7;
+const MAX_ALIGNED_RECEPTIONS = 16;
+const DEFAULT_BLANK: Cell = createBlankCell();
 
 export interface VoteBucket {
   readonly pageId: string;
   readonly bytesKey: string | null;
   readonly referenceScreen: Screen | null;
   readonly receptionsList: readonly Screen[];
+  readonly visitedReceptions: readonly VisitedReception[];
   readonly accumulator: IncrementalVote;
   readonly latestResult: VoteResult;
   readonly lastReception: Screen;
@@ -37,6 +45,7 @@ export interface VoteStore {
     readonly referenceScreen: Screen;
   } | null;
   readonly activePageId: string | null;
+  readonly lastOverallReception: Screen | null;
   readonly nextAutoIndex: number;
 }
 
@@ -45,6 +54,7 @@ export function createEmptyVoteStore(): VoteStore {
     buckets: {},
     pendingTx: null,
     activePageId: null,
+    lastOverallReception: null,
     nextAutoIndex: 1,
   };
 }
@@ -69,6 +79,38 @@ export function fingerprintPageBytes(bytes: Uint8Array): string {
     out += String.fromCharCode(bytes[i] & 0x7f);
   }
   return out;
+}
+
+function visitedAwareSimilarity(
+  incoming: Screen,
+  visitedMask: Uint8Array | undefined,
+  refScreen: Screen,
+  refVisitedMask?: Uint8Array,
+): number {
+  if (!visitedMask && !refVisitedMask) {
+    return screenSimilarity(incoming, refScreen);
+  }
+  let validPairs = 0;
+  let equalPairs = 0;
+  for (let r = 0; r < SCREEN_ROWS; r++) {
+    for (let c = 0; c < SCREEN_COLS; c++) {
+      const ca = incoming.rows[r][c];
+      const cb = refScreen.rows[r][c];
+      if (ca.error || cb.error) continue;
+      const idx = r * SCREEN_COLS + c;
+      if (visitedMask && visitedMask[idx] === 0 && !cellsEqual(cb, DEFAULT_BLANK, true)) {
+        continue;
+      }
+      if (refVisitedMask && refVisitedMask[idx] === 0 && !cellsEqual(ca, DEFAULT_BLANK, true)) {
+        continue;
+      }
+      validPairs++;
+      if (cellsEqual(ca, cb, true)) {
+        equalPairs++;
+      }
+    }
+  }
+  return validPairs === 0 ? 0 : equalPairs / validPairs;
 }
 
 /**
@@ -127,8 +169,12 @@ export function recordCompletedPageVote(
   store: VoteStore,
   screen: Screen,
   mode: LineMode,
+  visitedMask?: Uint8Array,
 ): VoteStore {
   const errCount = countScreenErrors(screen);
+  const entry: VisitedReception = visitedMask
+    ? { screen, visitedMask }
+    : { screen };
   const useKnownPageId =
     (mode === 'Seul' || mode === 'Serveur') && store.pendingTx !== null;
 
@@ -138,7 +184,13 @@ export function recordCompletedPageVote(
     const isSameContent = prev !== undefined && prev.bytesKey === bytesKey;
     const acc = isSameContent ? prev.accumulator.clone() : new IncrementalVote();
     acc.add(screen);
-    const latestResult = acc.result();
+    const nextVisited = isSameContent
+      ? prev.visitedReceptions.length < MAX_ALIGNED_RECEPTIONS
+        ? [...prev.visitedReceptions, entry]
+        : prev.visitedReceptions
+      : [entry];
+    const latestResult =
+      nextVisited.length >= 2 ? voteAligned(nextVisited) : acc.result();
     const maxSingleErrors = isSameContent
       ? Math.max(prev.maxSingleErrors, errCount)
       : errCount;
@@ -153,6 +205,7 @@ export function recordCompletedPageVote(
       bytesKey,
       referenceScreen,
       receptionsList: nextList,
+      visitedReceptions: nextVisited,
       accumulator: acc,
       latestResult,
       lastReception: screen,
@@ -166,6 +219,7 @@ export function recordCompletedPageVote(
         [pageId]: updatedBucket,
       },
       activePageId: pageId,
+      lastOverallReception: screen,
     };
   }
 
@@ -175,11 +229,14 @@ export function recordCompletedPageVote(
 
   for (const key of Object.keys(store.buckets)) {
     const candidate = store.buckets[key];
-    const refScreen =
-      candidate.accumulator.count() >= 2
-        ? candidate.latestResult.screen
-        : candidate.lastReception;
-    const sim = screenSimilarity(screen, refScreen);
+    const isMulti = candidate.accumulator.count() >= 2;
+    const refScreen = isMulti
+      ? candidate.latestResult.screen
+      : candidate.lastReception;
+    const refVisited = isMulti
+      ? undefined
+      : candidate.visitedReceptions[0]?.visitedMask;
+    const sim = visitedAwareSimilarity(screen, visitedMask, refScreen, refVisited);
     if (sim >= VOTE_MATCH_SIMILARITY && sim > bestSimilarity) {
       bestSimilarity = sim;
       bestBucket = candidate;
@@ -189,7 +246,12 @@ export function recordCompletedPageVote(
   if (bestBucket) {
     const acc = bestBucket.accumulator.clone();
     acc.add(screen);
-    const latestResult = acc.result();
+    const nextVisited =
+      bestBucket.visitedReceptions.length < MAX_ALIGNED_RECEPTIONS
+        ? [...bestBucket.visitedReceptions, entry]
+        : bestBucket.visitedReceptions;
+    const latestResult =
+      nextVisited.length >= 2 ? voteAligned(nextVisited) : acc.result();
     const nextList =
       bestBucket.receptionsList.length < MAX_STORED_RECEPTIONS_FOR_METRICS
         ? [...bestBucket.receptionsList, screen]
@@ -197,6 +259,7 @@ export function recordCompletedPageVote(
     const updatedBucket: VoteBucket = {
       ...bestBucket,
       receptionsList: nextList,
+      visitedReceptions: nextVisited,
       accumulator: acc,
       latestResult,
       lastReception: screen,
@@ -209,6 +272,7 @@ export function recordCompletedPageVote(
         [bestBucket.pageId]: updatedBucket,
       },
       activePageId: bestBucket.pageId,
+      lastOverallReception: screen,
     };
   }
 
@@ -221,11 +285,21 @@ export function recordCompletedPageVote(
     bytesKey: null,
     referenceScreen: null,
     receptionsList: [screen],
+    visitedReceptions: [entry],
     accumulator: acc,
     latestResult,
     lastReception: screen,
     maxSingleErrors: errCount,
   };
+
+  // Do not let a single heavily damaged outlier pass displace an established >= 3-reception vote.
+  const currentActive = store.activePageId
+    ? store.buckets[store.activePageId]
+    : undefined;
+  const keepEstablishedActive =
+    currentActive !== undefined &&
+    currentActive.accumulator.count() >= 3 &&
+    errCount >= 40;
 
   return {
     ...store,
@@ -233,7 +307,8 @@ export function recordCompletedPageVote(
       ...store.buckets,
       [autoId]: createdBucket,
     },
-    activePageId: autoId,
+    activePageId: keepEstablishedActive ? store.activePageId : autoId,
+    lastOverallReception: screen,
     nextAutoIndex: store.nextAutoIndex + 1,
   };
 }
@@ -257,7 +332,7 @@ export function selectDisplayedScreenForVote(
   if (voteOn && bucket.accumulator.count() >= 2) {
     return bucket.latestResult.screen;
   }
-  return bucket.lastReception;
+  return store.lastOverallReception ?? bucket.lastReception;
 }
 
 export function getActiveVoteSummary(store: VoteStore): ActiveVoteSummary | null {

@@ -20,6 +20,16 @@ export type LevelDamage =
       readonly ebN0Db: number;
       readonly repeats: number;
       readonly gapMs: number;
+      /**
+       * Optional periodic interference burst wave (constant frequency across the WAV with a +3/7
+       * beat per repetition): ensures >= 50% single-pass code-row CER while keeping clean spans
+       * at high Eb/N0 so acoustic playback preserves wide SNR/clock/echo margin.
+       */
+      readonly burstWave?: {
+        readonly cyclesPerPass: number;
+        readonly duty: number;
+        readonly burstEbN0Db: number;
+      };
     }
   | {
       readonly kind: 'backward';

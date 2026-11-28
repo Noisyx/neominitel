@@ -595,6 +595,7 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
               nextVotes,
               safeScreen,
               state.mode,
+              ev.visitedMask,
             );
             nextBase = selectDisplayedScreenForVote(
               nextVotes,

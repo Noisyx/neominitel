@@ -20,7 +20,13 @@ interface LevelSource {
     | { kind: 'clean' }
     | { kind: 'noise'; ebN0Db: number }
     | { kind: 'offset'; offsetHz: number; ebN0Db: number }
-    | { kind: 'whisper'; ebN0Db: number; repeats: number; gapMs: number }
+    | {
+        kind: 'whisper';
+        ebN0Db: number;
+        repeats: number;
+        gapMs: number;
+        burstWave?: { cyclesPerPass: number; duty: number; burstEbN0Db: number };
+      }
     | { kind: 'backward'; decoyPage: string; ebN0Db: number };
   feature: 'none' | 'parity' | 'adaptive' | 'vote' | 'backward';
   seed: number;                   // first seed to try
@@ -33,7 +39,7 @@ Starting values (to calibrate, task 5):
 | L1 | clean |
 | L2 | noise, Eb/N0 ≈ 13.5 dB (initial draft: 10 dB; then 12.5 dB for ~17 parity erasures with CER = 0 on code row; raised to 13.5 dB by the task 5 simulated pre-calibration, because at 12.5 dB any new noise on an acoustic path breaks the code row about one time in two, see `docs/calibration.md` "FANTOME") |
 | L3 | offset +380 Hz, Eb/N0 ≈ 18 dB |
-| L4 | whisper, Eb/N0 ≈ 11.5 dB, 7 repeats, 1 s gaps (initial draft: 5 dB; adjusted for Curve-3 BER where 5 dB has 60% BER, while 11.5 dB gives 100% single-pass code-row CER and 0% 7-vote CER) |
+| L4 | whisper, carrier Eb/N0 ≈ 18 dB swept by a periodic interference wave (`burstWave`: 8.43 cycles/pass, 33 % duty at Eb/N0 = 3.5 dB), 7 repeats, 0.8 s gaps. Why changed from uniform 11.5 dB AWGN (`docs/calibration.md` "FANTOME"): with memoryless uniform AWGN or uncoordinated Poisson bursts over 7 passes, no parameter window satisfies both single-pass CER ≥ 50 % and acoustic perturbation resilience (+30/25/20 dB noise, ±1000 ppm clock, room echo); a constant-frequency interference wave (~176 ms bursts < 300 ms pageEnd idle threshold, ~358 ms clean windows) with a +3/7 beat per pass damages ≥ 60 % of every single pass while giving every code-row cell ≥ 3 clean 18 dB passes, paired with intra-row `US` re-anchoring and `voteAligned` island realignment in `videotex`. |
 | L5 | `[STRETCH]` backward channel carries the code page; forward carries a decoy page ("Il n'y a rien ici…"). Added in task 7: Eb/N0 18 dB (relative to the forward bit, so the 75 baud code page has a wide margin; the difficulty is the channel, not the noise); accepted on seed 5001, feature off code-row CER 100 %. The WAV lasts about as long as the code page at 7.5 characters per second. |
 
 ## Manifest (`public/transmissions/manifest.json`, served)

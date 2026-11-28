@@ -54,6 +54,7 @@ export interface VerificationOutcome {
   readonly cerFeatureOff?: number;
   readonly pageErrorCellsOn: number;
   readonly receptionsGroupedOn: number;
+  readonly minCodeRowAgreeOn?: number;
 }
 
 function createSeededRng(seed: number): () => number {
@@ -136,6 +137,90 @@ export function normalizeToMinusOneDbfs(samples: Float32Array): Float32Array {
   const scale = maxAbs > 0 ? targetPeak / maxAbs : 1;
   for (let i = 0; i < samples.length; i++) {
     out[i] = Number.isFinite(samples[i]) ? samples[i] * scale : 0;
+  }
+  return out;
+}
+
+function applyWhisperBurstWaveChannel(
+  clean: Float32Array,
+  singlePassSamples: number,
+  gapMs: number,
+  sampleRate: number,
+  seed: number,
+  cleanEbN0Db: number,
+  burstWave: {
+    readonly cyclesPerPass: number;
+    readonly duty: number;
+    readonly burstEbN0Db: number;
+  },
+): Float32Array {
+  const chRes = createChannel({
+    sampleRate,
+    seed: seed >>> 0,
+    channel: 'forward',
+    signalAmplitude: 0.5,
+    noise: { kind: 'ebN0', db: cleanEbN0Db },
+  });
+  if (!chRes.ok) {
+    throw new Error(`createChannel failed: ${JSON.stringify(chRes.error)}`);
+  }
+  const ch = chRes.value;
+
+  // Constant-frequency interference wave across the page body, out of phase with the
+  // repetition period by +3/7 cycle so every cell lands in the clean Eb/N0 window on >= 3 passes
+  // while every single pass suffers >= 50% code-row CER. Keep the 120 ms lead-in (carrier + FF)
+  // and the inter-pass idle gap at cleanEbN0Db so adaptive init and pageEnd framing stay exact.
+  const leadCleanSamples = Math.round(0.12 * sampleRate);
+  const tailCleanSamples = Math.round((gapMs / 1000) * sampleRate);
+  const bodySamples = Math.max(
+    1,
+    singlePassSamples - leadCleanSamples - tailCleanSamples,
+  );
+  const wavePeriodSamples = bodySamples / (burstWave.cyclesPerPass + 3 / 7);
+  const phaseRng = createSeededRng((seed ^ 0x4c34_7768) >>> 0);
+  const initialPhase = phaseRng();
+
+  const chunks: Float32Array[] = [];
+  const stepSamples = Math.max(64, Math.round(0.008 * sampleRate)); // 8 ms (~1 char) resolution
+  let currentlyInBurst = false;
+
+  for (let pos = 0; pos < clean.length; pos += stepSamples) {
+    const end = Math.min(clean.length, pos + stepSamples);
+    const mid = 0.5 * (pos + end);
+    const passIdx = Math.floor(mid / singlePassSamples);
+    const offsetInPass = mid - passIdx * singlePassSamples;
+    const inPageBody =
+      offsetInPass >= leadCleanSamples &&
+      offsetInPass < singlePassSamples - tailCleanSamples;
+
+    let wantBurst = false;
+    if (inPageBody) {
+      const bodyElapsed =
+        passIdx * bodySamples + (offsetInPass - leadCleanSamples);
+      const rawPhase = initialPhase + bodyElapsed / wavePeriodSamples;
+      const fracPhase = rawPhase - Math.floor(rawPhase);
+      wantBurst = fracPhase < burstWave.duty;
+    }
+
+    if (wantBurst !== currentlyInBurst) {
+      ch.setParams({
+        noise: {
+          kind: 'ebN0',
+          db: wantBurst ? burstWave.burstEbN0Db : cleanEbN0Db,
+        },
+      });
+      currentlyInBurst = wantBurst;
+    }
+    chunks.push(ch.process(clean.subarray(pos, end)));
+  }
+  chunks.push(ch.flush());
+
+  const totalLen = chunks.reduce((acc, c) => acc + c.length, 0);
+  const out = new Float32Array(totalLen);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.length;
   }
   return out;
 }
@@ -264,9 +349,21 @@ export function synthesizeLevelWav(
       for (let r = 0; r < level.damage.repeats; r++) {
         repeated.set(singleMod.value, r * singleLen);
       }
-      damagedSignal = applyStreamedChannel(repeated, sampleRate, seedCandidate, {
-        ebN0Db: level.damage.ebN0Db,
-      });
+      if (level.damage.burstWave !== undefined) {
+        damagedSignal = applyWhisperBurstWaveChannel(
+          repeated,
+          singleLen,
+          level.damage.gapMs,
+          sampleRate,
+          seedCandidate,
+          level.damage.ebN0Db,
+          level.damage.burstWave,
+        );
+      } else {
+        damagedSignal = applyStreamedChannel(repeated, sampleRate, seedCandidate, {
+          ebN0Db: level.damage.ebN0Db,
+        });
+      }
       break;
     }
 
@@ -338,6 +435,7 @@ export function decodeWavWithAppPipeline(
 ): {
   finalScreen: Screen;
   receptionsInActiveVote: number;
+  activeVoteAgree?: Uint8Array;
 } {
   const parsed = readWav(wavBytes);
   if (!parsed.ok) {
@@ -361,16 +459,30 @@ export function decodeWavWithAppPipeline(
 
   let voteStore = createEmptyVoteStore();
   let pageActive = false;
+  let pageStartedByFf = false;
   let lastCharSample = 0;
   let streamCursor = 0;
   let latestScreen = createBlankScreen();
 
   function commitCompletedPage(): void {
+    const stats = vtxDecoder.stats();
     const completed = vtxDecoder.screen();
-    latestScreen = completed;
-    voteStore = recordCompletedPageVote(voteStore, completed, 'Fichier');
+    const visitedMask = vtxDecoder.visitedMask();
+    const wasStartedByFf = pageStartedByFf;
     vtxDecoder.reset();
     pageActive = false;
+    pageStartedByFf = false;
+
+    if (!wasStartedByFf && stats.printable < 16) {
+      return;
+    }
+    latestScreen = completed;
+    voteStore = recordCompletedPageVote(
+      voteStore,
+      completed,
+      'Fichier',
+      visitedMask,
+    );
   }
 
   function handleEvents(
@@ -387,13 +499,25 @@ export function decodeWavWithAppPipeline(
           commitCompletedPage();
         }
         const hasError = !ev.parityOk || !ev.framingOk;
+        const isCleanFf = !hasError && (ev.value & 0x7f) === C0.FF;
+        if (isCleanFf && pageActive) {
+          if (vtxDecoder.stats().printable >= 20) {
+            commitCompletedPage();
+          } else {
+            vtxDecoder.reset();
+            pageActive = false;
+            pageStartedByFf = false;
+          }
+        }
         const { changed } = vtxDecoder.push({
           value: ev.value,
           error: hasError,
         });
-        const isPageClear =
-          !hasError && (ev.value & 0x7f) === C0.FF && changed.length === 960;
-        if (isPageClear || !pageActive) {
+        const isPageClear = isCleanFf && changed.length === 960;
+        if (isPageClear) {
+          pageActive = true;
+          pageStartedByFf = true;
+        } else if (!pageActive) {
           pageActive = true;
         }
         lastCharSample = ev.atSample;
@@ -428,6 +552,10 @@ export function decodeWavWithAppPipeline(
   return {
     finalScreen,
     receptionsInActiveVote: summary?.receptions ?? 0,
+    activeVoteAgree:
+      voteStore.activePageId && voteStore.buckets[voteStore.activePageId]
+        ? voteStore.buckets[voteStore.activePageId].latestResult.agree
+        : undefined,
   };
 }
 
@@ -487,6 +615,15 @@ export function verifyLevelWav(
   const onRun = decodeWavWithAppPipeline(wavBytes, modes.on);
   const cerOn = cellErrorRate(onRun.finalScreen, refScreen, [level.codeRow]);
   const pageErrorsOn = countScreenErrors(onRun.finalScreen);
+  let minCodeRowAgreeOn: number | undefined;
+  if (onRun.activeVoteAgree !== undefined) {
+    let minA = 255;
+    for (let c = 0; c < 40; c++) {
+      const a = onRun.activeVoteAgree[level.codeRow * 40 + c];
+      if (a < minA) minA = a;
+    }
+    minCodeRowAgreeOn = minA;
+  }
 
   if (cerOn !== 0) {
     return {
@@ -543,6 +680,7 @@ export function verifyLevelWav(
       cerFeatureOff: cerOff,
       pageErrorCellsOn: pageErrorsOn,
       receptionsGroupedOn: onRun.receptionsInActiveVote,
+      minCodeRowAgreeOn,
     };
   }
 
@@ -551,6 +689,7 @@ export function verifyLevelWav(
     cerFeatureOn: cerOn,
     pageErrorCellsOn: pageErrorsOn,
     receptionsGroupedOn: onRun.receptionsInActiveVote,
+    minCodeRowAgreeOn,
   };
 }
 
@@ -588,7 +727,13 @@ export function generateAllTransmissions(
       const candidateSeed = level.seed + attempt;
       const { wavBytes } = synthesizeLevelWav(level, candidateSeed, sampleRate);
       const check = verifyLevelWav(level, wavBytes);
-      if (check.ok) {
+      // For L4 whisper generation, require >= 3 agreeing votes on every code-row cell and
+      // >= 60% feature-OFF CER so acoustic playback perturbations and extra bursts retain margin.
+      const hasGenerationMargin =
+        level.damage.kind !== 'whisper' ||
+        ((check.minCodeRowAgreeOn ?? 0) >= 3 &&
+          (check.cerFeatureOff ?? 0) >= 0.6);
+      if (check.ok && hasGenerationMargin) {
         chosenSeed = candidateSeed;
         chosenWav = wavBytes;
         if (!options?.quiet) {
@@ -596,13 +741,21 @@ export function generateAllTransmissions(
             check.cerFeatureOff !== undefined
               ? `, feature-OFF CER=${(check.cerFeatureOff * 100).toFixed(0)}%`
               : '';
+          const agreeText =
+            check.minCodeRowAgreeOn !== undefined && level.damage.kind === 'whisper'
+              ? `, minAgree=${check.minCodeRowAgreeOn}`
+              : '';
           console.log(
-            `[fantome] ${level.id} (${level.title}): OK on seed ${chosenSeed} (attempt ${attempt + 1}/${MAX_SEED_ATTEMPTS}, pageErrors=${check.pageErrorCellsOn}${offText})`,
+            `[fantome] ${level.id} (${level.title}): OK on seed ${chosenSeed} (attempt ${attempt + 1}/${MAX_SEED_ATTEMPTS}, pageErrors=${check.pageErrorCellsOn}${agreeText}${offText})`,
           );
         }
         break;
       }
-      lastFailure = `seed ${candidateSeed}: ${check.reason ?? 'failed'}`;
+      lastFailure = `seed ${candidateSeed}: ${
+        check.ok
+          ? `insufficient margin (minAgree=${check.minCodeRowAgreeOn ?? 0}, cerOff=${((check.cerFeatureOff ?? 0) * 100).toFixed(0)}%)`
+          : (check.reason ?? 'failed')
+      }`;
     }
 
     if (chosenSeed === null || chosenWav === null) {

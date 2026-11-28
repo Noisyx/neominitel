@@ -38,6 +38,8 @@ export interface VideotexDecoder {
   pushMany(bytes: Iterable<RxByte | number>): { changed: [row: number, col: number][] };
   cellAt(row: number, col: number): Cell;
   screen(): Screen;
+  /** Row-major (25 * 40) mask of cells explicitly written without parity/framing error since reset/FF. */
+  visitedMask(): Uint8Array;
   stats(): DecoderStats;
   reset(): void;
 }
@@ -56,6 +58,7 @@ type DecoderState =
 
 export function createVideotexDecoder(): VideotexDecoder {
   let currentScreen: Screen = createBlankScreen();
+  const visitedCells = new Uint8Array(SCREEN_ROWS * SCREEN_COLS);
   let state: DecoderState = { kind: 'NORMAL' };
   let lastPrintedCell: Cell | null = null;
   let currentStats: DecoderStats = {
@@ -122,6 +125,7 @@ export function createVideotexDecoder(): VideotexDecoder {
       const plain = cloneCell(cell);
       delete plain.part;
       currentScreen.rows[row][col] = plain;
+      visitedCells[row * SCREEN_COLS + col] = cell.error ? 0 : 1;
       changed.push([row, col]);
       advanceCursor();
       return;
@@ -135,6 +139,7 @@ export function createVideotexDecoder(): VideotexDecoder {
         const part = cloneCell(cell);
         part.part = { x: i as 0 | 1, y: (h - 1 - j) as 0 | 1 };
         currentScreen.rows[r][c] = part;
+        visitedCells[r * SCREEN_COLS + c] = cell.error ? 0 : 1;
         changed.push([r, c]);
       }
     }
@@ -222,6 +227,7 @@ export function createVideotexDecoder(): VideotexDecoder {
             changed.push([r, c]);
           }
         }
+        visitedCells.fill(0, PAGE_FIRST_ROW * SCREEN_COLS);
         currentScreen.cursor.row = PAGE_FIRST_ROW;
         currentScreen.cursor.col = 0;
         currentScreen.attrs = createDefaultAttributes();
@@ -277,6 +283,7 @@ export function createVideotexDecoder(): VideotexDecoder {
             fg: currentScreen.attrs.fg,
             bg: currentScreen.attrs.bg,
           });
+          visitedCells[r * SCREEN_COLS + c] = 1;
           changed.push([r, c]);
         }
         break;
@@ -587,11 +594,15 @@ export function createVideotexDecoder(): VideotexDecoder {
     screen(): Screen {
       return cloneScreen(currentScreen);
     },
+    visitedMask(): Uint8Array {
+      return visitedCells.slice();
+    },
     stats(): DecoderStats {
       return { ...currentStats };
     },
     reset(): void {
       currentScreen = createBlankScreen();
+      visitedCells.fill(0);
       state = { kind: 'NORMAL' };
       lastPrintedCell = null;
       currentStats = {
